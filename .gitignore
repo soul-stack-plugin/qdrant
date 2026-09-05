@@ -1,0 +1,7 @@
+dist/
+*.test
+coverage.out
+
+# Defensive: `go build .` in the repository root drops the binary here rather than
+# in dist/, and an 18 MB artifact in a commit is easy to miss in review.
+/qdrant
