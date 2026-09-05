@@ -14,6 +14,7 @@ package qdrant
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -213,8 +214,26 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 		if err := m.precheckCreateBody(ctx, api, name, createBody(declared), apiKey); err != nil {
 			return sendFailure(stream, fmt.Sprintf("collection %q was NOT touched: %s", name, err.Error()))
 		}
-		if err := m.dropCollection(ctx, api, name, apiKey); err != nil {
+		// A name occupied by an ALIAS reads as present through GET (which resolves
+		// aliases) but cannot be dropped or created through it. Refusing here keeps
+		// the module from announcing a destruction it did not perform.
+		if aliases, err := listAliases(ctx, api, apiKey); err != nil {
+			return sendFailure(stream, fmt.Sprintf("collection %q was NOT touched: %s", name, err.Error()))
+		} else if target, isAlias := aliases[name]; isAlias {
+			return sendFailure(stream, fmt.Sprintf(
+				"collection %q was NOT touched: %q is an ALIAS pointing at collection %q, not a collection. Qdrant resolves an alias on a read but refuses to create or delete through one, so this state cannot rebuild it. Address the collection by its own name, or move the alias first with qdrant.alias.",
+				name, name, target))
+		}
+		removed, err := m.dropCollection(ctx, api, name, apiKey)
+		if err != nil {
 			return sendFailure(stream, err.Error())
+		}
+		if !removed {
+			// Qdrant reported that nothing was deleted. Something else removed or
+			// renamed it between the read and this call; either way nothing of ours
+			// is gone, and saying so beats the alternative message.
+			return sendFailure(stream, fmt.Sprintf(
+				"collection %q was NOT dropped — Qdrant reported there was nothing to delete, so it disappeared between the read and the drop. Nothing was destroyed by this step; re-run to see the current state.", name))
 		}
 		if err := m.createCollection(ctx, api, name, createBody(declared), apiKey); err != nil {
 			// The collection is already gone. Say that first and plainly: an operator
@@ -289,6 +308,16 @@ func (m *Module) verifyCollection(ctx context.Context, stream eventStream, api q
 	return sendOutcome(stream, true, message, output)
 }
 
+// precheckName is the throwaway collection the pre-flight builds under.
+//
+// Derived from a hash rather than concatenated, so it is a constant 20 characters
+// whatever the subject is called: Qdrant caps a collection name at 255 (measured), and
+// a plain suffix made this state fail on a legal 243-character name that every other
+// state handles.
+func precheckName(name string) string {
+	return fmt.Sprintf("ss_precheck_%x", sha256.Sum256([]byte(name)))[:20]
+}
+
 // precheckCreateBody proves the declared create body is acceptable to THIS server —
 // by building it under a throwaway name and removing it again — BEFORE anything
 // destructive happens.
@@ -313,7 +342,7 @@ func (m *Module) verifyCollection(ctx context.Context, stream eventStream, api q
 // limits.go is still worth keeping in front of it: it turns the common typo into a
 // message that names the parameter, instead of a 400 relayed from the server.
 func (m *Module) precheckCreateBody(ctx context.Context, api qdrantAPI, name string, body map[string]any, apiKey string) error {
-	probe := name + "__ss_precheck"
+	probe := precheckName(name)
 
 	// Never touch a collection that is already there — the name is unlikely, but
 	// "unlikely" is not a licence to delete someone's data.
@@ -324,10 +353,15 @@ func (m *Module) precheckCreateBody(ctx context.Context, api qdrantAPI, name str
 	}
 
 	if err := m.createCollection(ctx, api, probe, body, apiKey); err != nil {
-		return fmt.Errorf("Qdrant would refuse this declaration, and this state drops the collection before it creates it — %s", err.Error())
+		// The create may have landed anyway — a client-side timeout on a slow create
+		// is indistinguishable from a rejection from here — and a leftover probe
+		// would block this state on every subsequent run. Best effort, and the
+		// outcome does not change what the operator is told.
+		_, _ = m.dropCollection(ctx, api, probe, apiKey)
+		return fmt.Errorf("the pre-flight build of this declaration failed, so nothing was dropped — %s", err.Error())
 	}
 
-	if err := m.dropCollection(ctx, api, probe, apiKey); err != nil {
+	if _, err := m.dropCollection(ctx, api, probe, apiKey); err != nil {
 		// The declaration is fine, but a leftover would collide with the next run.
 		// Stop rather than proceed: whatever prevents a delete now would prevent the
 		// real one in a moment.
@@ -350,7 +384,7 @@ func (m *Module) applyCollectionAbsent(ctx context.Context, stream eventStream, 
 	if !exists {
 		return sendOutcome(stream, false, fmt.Sprintf("collection %q is already absent", name), map[string]any{"name": name})
 	}
-	if err := m.dropCollection(ctx, api, name, apiKey); err != nil {
+	if _, err := m.dropCollection(ctx, api, name, apiKey); err != nil {
 		return sendFailure(stream, err.Error())
 	}
 	// Qdrant answers 200 {"result":false} when there was nothing to delete, so the
@@ -455,15 +489,30 @@ func (m *Module) patchCollection(ctx context.Context, api qdrantAPI, name string
 	return nil
 }
 
-func (m *Module) dropCollection(ctx context.Context, api qdrantAPI, name string, apiKey string) error {
+// dropCollection removes a collection and reports whether it actually removed one.
+//
+// The bool is not decoration. Qdrant answers 200 `{"result":false}` when there was
+// nothing to delete, and "nothing to delete" is reachable with a name that reads as
+// present: `GET /collections/<x>` RESOLVES AN ALIAS and returns the target's config,
+// while `DELETE /collections/<x>` does not resolve and removes nothing. Treating that
+// as a successful drop is how this state came to announce destroyed data that was
+// entirely intact.
+func (m *Module) dropCollection(ctx context.Context, api qdrantAPI, name string, apiKey string) (bool, error) {
 	res, err := api.do(ctx, http.MethodDelete, "/collections/"+url.PathEscape(name), nil)
 	if err != nil {
-		return fmt.Errorf("delete collection %q: %s", name, redactError(err, apiKey))
+		return false, fmt.Errorf("delete collection %q: %s", name, redactError(err, apiKey))
 	}
 	if !res.ok() {
-		return fmt.Errorf("delete collection %q: %s", name, redactString(res.errorText(), apiKey))
+		return false, fmt.Errorf("delete collection %q: %s", name, redactString(res.errorText(), apiKey))
 	}
-	return nil
+	var removed bool
+	if err := res.decodeResult(&removed); err != nil {
+		// An answer whose result cannot be read is not evidence either way; assume
+		// nothing was removed rather than report a destruction that may not have
+		// happened.
+		return false, nil
+	}
+	return removed, nil
 }
 
 // addVector adds one named vector to an existing collection. The body is Qdrant's

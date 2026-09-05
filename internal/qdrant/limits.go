@@ -124,7 +124,7 @@ var passthroughKeys = map[string]map[string]bool{
 	"hnsw_config": {
 		"m": true, "ef_construct": true, "full_scan_threshold": true,
 		"max_indexing_threads": true, "on_disk": true, "payload_m": true,
-		"inline_storage": true, "memory": true,
+		"inline_storage": true,
 	},
 	"optimizers_config": {
 		"deleted_threshold": true, "vacuum_min_vector_number": true,
@@ -136,14 +136,42 @@ var passthroughKeys = map[string]map[string]bool{
 	"wal_config": {
 		"wal_capacity_mb": true, "wal_segments_ahead": true, "wal_retain_closed": true,
 	},
+	// Per-vector and CREATION-ONLY: an unknown key here is permanent drift, and
+	// permanent drift on a creation-only setting is a rebuild on every run.
+	"multivector_config": {
+		"comparator": true,
+	},
+	// The outer arm only. The inside of each is a union this module does not model,
+	// and it is mutable — an unknown key there costs a failing read-back, not data.
+	"quantization_config": {
+		"scalar": true, "product": true, "binary": true,
+	},
 }
 
 // checkPassthroughKeys reports every key inside a managed config map that Qdrant does
 // not know. Deterministic order.
 func checkPassthroughKeys(declared map[string]any) []string {
+	errs := checkMapKeys(declared, "params")
+
+	// And INSIDE each vector, which is where the worst instance lives:
+	// `multivector_config` is creation-only, so an unknown key in it is permanent
+	// drift, and permanent drift on a creation-only setting makes `recreated` drop
+	// and rebuild on every single run.
+	if raw, ok := declared["vectors"]; ok {
+		vectors := normalizeVectors(raw)
+		for _, name := range sortedKeys(vectors) {
+			errs = append(errs, checkMapKeys(vectors[name], "params.vectors."+quoteVectorName(name))...)
+		}
+	}
+	return errs
+}
+
+// checkMapKeys applies the table to one level: every managed config map directly
+// inside `holder`, addressed under prefix.
+func checkMapKeys(holder map[string]any, prefix string) []string {
 	var errs []string
 	for _, param := range sortedKeys(passthroughKeys) {
-		nested, ok := declared[param].(map[string]any)
+		nested, ok := holder[param].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -152,8 +180,8 @@ func checkPassthroughKeys(declared map[string]any) []string {
 				continue
 			}
 			errs = append(errs, fmt.Sprintf(
-				"params.%s.%s: not a setting Qdrant knows (expected %s) — it would be discarded in silence and still answered 200, so it is refused here instead",
-				param, key, strings.Join(sortedKeys(passthroughKeys[param]), ", ")))
+				"%s.%s.%s: not a setting Qdrant knows (expected %s) — it would be discarded in silence and still answered 200, so it is refused here instead",
+				prefix, param, key, strings.Join(sortedKeys(passthroughKeys[param]), ", ")))
 		}
 	}
 	return errs

@@ -42,8 +42,9 @@ func liveFour(t *testing.T) apiResult {
 func TestPrecheckStopsBeforeTheDropWhenTheServerRefusesTheBody(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveFour(t)).
-		on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
-		on("PUT", "/collections/docs__ss_precheck",
+		on("GET", "/collections/ss_precheck_46b42b42", notFoundResult("Collection `ss_precheck_46b42b42` doesn't exist!")).
+		on("DELETE", "/collections/ss_precheck_46b42b42", okResult(t, false)).
+		on("PUT", "/collections/ss_precheck_46b42b42",
 			errorResult(500, `Service internal error: Tokio task join error: task panicked with message "called `+"`Option::unwrap()`"+` on a `+"`None`"+` value"`))
 
 	stream := runApply(t, moduleWith(api).collection(), "recreated", recreateParams(nil))
@@ -67,9 +68,10 @@ func TestPrecheckStopsBeforeTheDropWhenTheServerRefusesTheBody(t *testing.T) {
 func TestPrecheckRemovesItsOwnProbe(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveFour(t), liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil))).
-		on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
-		on("PUT", "/collections/docs__ss_precheck", okTrue(t)).
-		on("DELETE", "/collections/docs__ss_precheck", okTrue(t)).
+		on("GET", "/collections/ss_precheck_46b42b42", notFoundResult("Collection `ss_precheck_46b42b42` doesn't exist!")).
+		on("PUT", "/collections/ss_precheck_46b42b42", okTrue(t)).
+		on("DELETE", "/collections/ss_precheck_46b42b42", okTrue(t)).
+		on("GET", "/aliases", noAliases(t)).
 		on("DELETE", "/collections/docs", okTrue(t)).
 		on("PUT", "/collections/docs", okTrue(t))
 
@@ -79,7 +81,7 @@ func TestPrecheckRemovesItsOwnProbe(t *testing.T) {
 
 	var probeDeleted bool
 	for _, c := range api.mutating() {
-		if c.key() == "DELETE /collections/docs__ss_precheck" {
+		if c.key() == "DELETE /collections/ss_precheck_46b42b42" {
 			probeDeleted = true
 		}
 	}
@@ -93,9 +95,10 @@ func TestPrecheckRemovesItsOwnProbe(t *testing.T) {
 func TestPrecheckRunsBeforeTheDrop(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveFour(t), liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil))).
-		on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
-		on("PUT", "/collections/docs__ss_precheck", okTrue(t)).
-		on("DELETE", "/collections/docs__ss_precheck", okTrue(t)).
+		on("GET", "/collections/ss_precheck_46b42b42", notFoundResult("Collection `ss_precheck_46b42b42` doesn't exist!")).
+		on("PUT", "/collections/ss_precheck_46b42b42", okTrue(t)).
+		on("DELETE", "/collections/ss_precheck_46b42b42", okTrue(t)).
+		on("GET", "/aliases", noAliases(t)).
 		on("DELETE", "/collections/docs", okTrue(t)).
 		on("PUT", "/collections/docs", okTrue(t))
 
@@ -104,7 +107,7 @@ func TestPrecheckRunsBeforeTheDrop(t *testing.T) {
 	probeCreated, realDropped := -1, -1
 	for i, c := range api.calls {
 		switch c.key() {
-		case "PUT /collections/docs__ss_precheck":
+		case "PUT /collections/ss_precheck_46b42b42":
 			probeCreated = i
 		case "DELETE /collections/docs":
 			realDropped = i
@@ -123,7 +126,7 @@ func TestPrecheckRunsBeforeTheDrop(t *testing.T) {
 func TestPrecheckWillNotClobberAnExistingCollection(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveFour(t)).
-		on("GET", "/collections/docs__ss_precheck", liveFour(t))
+		on("GET", "/collections/ss_precheck_46b42b42", liveFour(t))
 
 	event := runApply(t, moduleWith(api).collection(), "recreated", recreateParams(nil)).final()
 

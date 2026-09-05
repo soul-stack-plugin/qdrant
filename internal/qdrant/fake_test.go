@@ -290,3 +290,11 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(raw)
 }
+
+// noAliases is the alias list of an instance that has none — the recreate path reads
+// it before dropping, because a name occupied by an alias reads as present through GET
+// and cannot be dropped or created through.
+func noAliases(t *testing.T) apiResult {
+	t.Helper()
+	return okResult(t, map[string]any{"aliases": []any{}})
+}

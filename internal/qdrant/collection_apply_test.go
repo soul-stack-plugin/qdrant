@@ -197,9 +197,10 @@ func TestCollectionRecreatedOnlyDropsOnConflict(t *testing.T) {
 				liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil))).
 			// The pre-flight: the declared body is built under a throwaway name and
 			// removed again before anything real is dropped.
-			on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
-			on("PUT", "/collections/docs__ss_precheck", okTrue(t)).
-			on("DELETE", "/collections/docs__ss_precheck", okTrue(t)).
+			on("GET", "/collections/ss_precheck_46b42b42", notFoundResult("Collection `ss_precheck_46b42b42` doesn't exist!")).
+			on("PUT", "/collections/ss_precheck_46b42b42", okTrue(t)).
+			on("DELETE", "/collections/ss_precheck_46b42b42", okTrue(t)).
+			on("GET", "/aliases", noAliases(t)).
 			on("DELETE", "/collections/docs", okTrue(t)).
 			on("PUT", "/collections/docs", okTrue(t))
 
