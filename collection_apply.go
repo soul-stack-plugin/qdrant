@@ -49,7 +49,11 @@ func validateCollectionAbsent(f map[string]*structpb.Value) []string {
 // doing things, and a phase that lets through what the next phase will refuse is not
 // a validation phase.
 func validateCollectionPresent(f map[string]*structpb.Value) []string {
-	return append(validateCollectionProbed(f), validateVectors(f)...)
+	errs := append(validateCollectionProbed(f), validateVectors(f)...)
+	// The numeric bounds Qdrant enforces on a create body (limits.go). Refused here
+	// so a typo stops the run before it starts — and checked AGAIN before the drop in
+	// `recreated`, which is the one path where letting one through costs the data.
+	return append(errs, checkCollectionBounds(declaredCollection(f))...)
 }
 
 // validateCollectionRecreated — as present, plus the explicit authority to destroy.
@@ -114,10 +118,17 @@ func (m *QdrantModule) applyCollectionProbed(ctx context.Context, stream eventSt
 		return sendFailure(stream, err.Error())
 	}
 	if !exists {
+		// Every key the state's Description promises, so a gate written against
+		// register.self.points_count resolves rather than hitting a missing field on
+		// the one reading where the collection is not there.
 		return sendOutcome(stream, false, fmt.Sprintf("collection %q does not exist", name), map[string]any{
-			"name":   name,
-			"exists": false,
-			"status": "",
+			"name":                  name,
+			"exists":                false,
+			"status":                "",
+			"optimizer_status":      "",
+			"points_count":          int64(0),
+			"segments_count":        int64(0),
+			"indexed_vectors_count": int64(0),
 		})
 	}
 	return sendOutcome(stream, false, fmt.Sprintf("collection %q: %s", name, info.Status), map[string]any{
@@ -180,11 +191,30 @@ func (m *QdrantModule) reconcileCollection(ctx context.Context, stream eventStre
 	}
 
 	if len(plan.conflicts) > 0 {
+		// LAST CHANCE TO REFUSE. Past the DELETE below there is no way back: Qdrant
+		// has no dry-run create, and nothing rolls a drop back. A create body it
+		// would reject — shard_number 0, a vector size over the ceiling, an
+		// ef_construct under the floor — would end this run with the collection
+		// already destroyed and nothing to rebuild it from. Validate checks the same
+		// bounds, but Validate is a separate RPC a runner need not call, and this is
+		// the one path where that gap is paid for in data.
+		if errs := checkCollectionBounds(declared); len(errs) > 0 {
+			return sendFailure(stream, fmt.Sprintf(
+				"collection %q was NOT touched: Qdrant would refuse this declaration, and this state drops the collection BEFORE it creates it — %s",
+				name, strings.Join(errs, "; ")))
+		}
 		if err := m.dropCollection(ctx, api, name, apiKey); err != nil {
 			return sendFailure(stream, err.Error())
 		}
 		if err := m.createCollection(ctx, api, name, createBody(declared), apiKey); err != nil {
-			return sendFailure(stream, err.Error())
+			// The collection is already gone. Say that first and plainly: an operator
+			// who reads only the create error concludes the run stopped before doing
+			// anything, and re-runs a scenario whose later steps assume the data is
+			// still there.
+			return sendFailure(stream, fmt.Sprintf(
+				"collection %q HAS BEEN DROPPED AND ITS DATA IS GONE, and re-creating it then failed: %s. "+
+					"The collection does not exist right now — fix the declaration and re-run to create it empty, or restore from a snapshot.",
+				name, err.Error()))
 		}
 		return m.verifyCollection(ctx, stream, api, declared, name, apiKey, "recreated",
 			fmt.Sprintf("collection %q RECREATED, its data destroyed: %s", name, joinConflicts(plan.conflicts)),
@@ -379,12 +409,21 @@ func (m *QdrantModule) dropCollection(ctx context.Context, api qdrantAPI, name s
 // addVector adds one named vector to an existing collection. The body is Qdrant's
 // untagged VectorNameConfig, whose dense arm is `{"dense": {…}}`.
 //
+// spec carries ONLY the creation keys — [splitVectorSpec] has already taken the
+// tunable ones out, because Qdrant's DenseVectorConfig does not accept them and would
+// discard them in silence.
+//
+// `wait=true` for the same reason every other verified write in this artifact uses it:
+// without it the endpoint answers `acknowledged` and the read-back that follows races
+// the update, which on a busy collection shows up as an intermittent failure blaming a
+// declaration that was fine.
+//
 // This is the one mutating endpoint of Qdrant's that behaves the way the rest of this
 // object has to compensate for: re-sending an identical configuration is a no-op, and
 // the same name with a different size is a 400 that says exactly that, rather than a
 // silent success.
 func (m *QdrantModule) addVector(ctx context.Context, api qdrantAPI, collection, vector string, spec any, apiKey string) error {
-	path := "/collections/" + url.PathEscape(collection) + "/vectors/" + url.PathEscape(vector)
+	path := "/collections/" + url.PathEscape(collection) + "/vectors/" + url.PathEscape(vector) + "?wait=true"
 	res, err := api.do(ctx, http.MethodPut, path, map[string]any{"dense": spec})
 	if err != nil {
 		return fmt.Errorf("add vector %s to collection %q: %s", quoteVectorName(vector), collection, redactError(err, apiKey))

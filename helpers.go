@@ -19,7 +19,16 @@ import (
 // a run, which is precisely the shape the rule forbids. Two lists of rules drift; one
 // function cannot.
 func validateAddr(f map[string]*structpb.Value) []string {
-	if _, err := parseConnConfig(&structpb.Struct{Fields: f}); err != nil {
+	cfg, err := parseConnConfig(&structpb.Struct{Fields: f})
+	if err != nil {
+		return []string{err.Error()}
+	}
+	// And the TLS material, for the same reason. buildTLSConfig is a pure function of
+	// the declared params — a truncated PEM or half an mTLS pair is knowable here,
+	// with nothing yet done to the host. Leaving it to the connect made Validate
+	// report Ok on a declaration Apply was certain to refuse, which is precisely the
+	// hole this rule closes.
+	if _, err := buildTLSConfig(cfg.tls); err != nil {
 		return []string{err.Error()}
 	}
 	return nil

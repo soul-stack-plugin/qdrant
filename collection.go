@@ -315,7 +315,20 @@ func planVectors(declared map[string]any, live map[string]any, plan *collectionP
 			// A named vector the collection does not have yet is added in place:
 			// Qdrant has an endpoint for exactly that and it destroys nothing — the
 			// existing points simply hold no value for it.
-			plan.addVectors[name] = wantVec
+			//
+			// The spec is SPLIT rather than sent whole. Qdrant's DenseVectorConfig —
+			// the body of that endpoint — carries only the keys that define the
+			// vector space, and says so itself: "Storage type, index type, and
+			// quantization are inferred". Sending `hnsw_config` or `on_disk` in it
+			// would be discarded exactly the way this whole object exists to catch,
+			// and the read-back would then fail the step on a declaration that is
+			// perfectly legal. So the creation keys go to the add, and the tunable
+			// ones follow as a patch once the vector exists.
+			create, tune := splitVectorSpec(wantVec)
+			plan.addVectors[name] = create
+			for _, key := range sortedKeys(tune) {
+				setPath(plan.patch, []string{"vectors", name, key}, tune[key])
+			}
 			continue
 		}
 		for _, key := range sortedKeys(wantVec) {
@@ -347,6 +360,29 @@ func planVectors(declared map[string]any, live map[string]any, plan *collectionP
 			declared: "absent",
 		})
 	}
+}
+
+// splitVectorSpec divides one vector's declaration the way Qdrant's API divides it:
+// the keys that define the vector space and can only be set at creation, and the
+// tunable ones that must be applied afterwards through the collection update.
+//
+// The split is [vectorFields] read the other way round — false is creation, true is
+// tunable — so the two cannot drift apart. A key this module does not manage reaches
+// neither side; validateVectors refuses those up front.
+func splitVectorSpec(spec map[string]any) (create, tune map[string]any) {
+	create, tune = map[string]any{}, map[string]any{}
+	for key, value := range spec {
+		mutable, managed := vectorFields[key]
+		if !managed {
+			continue
+		}
+		if mutable {
+			tune[key] = value
+			continue
+		}
+		create[key] = value
+	}
+	return create, tune
 }
 
 // quoteVectorName renders the unnamed vector as `""` so a message about it reads as
@@ -407,8 +443,27 @@ func normalizeVectors(v any) map[string]map[string]any {
 // through structpb and encoding/json respectively, so there is no numeric-type
 // mismatch to accommodate.
 func subsetEquals(declared, live any) bool {
+	// Lists are compared element by element. `==` on two `any` whose dynamic type is
+	// a slice PANICS rather than returning false, and a panic inside Apply takes the
+	// plugin subprocess down mid-run; stock Qdrant returns no arrays under the managed
+	// paths, so this is a latent trap rather than a live one, but it is one line.
+	if dl, ok := declared.([]any); ok {
+		ll, ok := live.([]any)
+		if !ok || len(dl) != len(ll) {
+			return false
+		}
+		for i := range dl {
+			if !subsetEquals(dl[i], ll[i]) {
+				return false
+			}
+		}
+		return true
+	}
 	dm, dIsMap := declared.(map[string]any)
 	if !dIsMap {
+		if _, uncomparable := live.([]any); uncomparable {
+			return false
+		}
 		return declared == live
 	}
 	lm, lIsMap := live.(map[string]any)

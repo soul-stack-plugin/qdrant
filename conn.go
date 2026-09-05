@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -124,9 +125,16 @@ func (r apiResult) errorText() string {
 	if body == "" {
 		return fmt.Sprintf("HTTP %d", r.status)
 	}
+	// Truncated on a RUNE boundary. This text becomes ApplyEvent.Message, a proto3
+	// string, and protobuf refuses to marshal invalid UTF-8 — a byte-slice cut
+	// through a multi-byte character would turn a diagnostic into a transport error.
 	const maxBody = 512
 	if len(body) > maxBody {
-		body = body[:maxBody] + "…"
+		cut := maxBody
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut] + "…"
 	}
 	return fmt.Sprintf("HTTP %d: %s", r.status, body)
 }

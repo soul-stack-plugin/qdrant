@@ -233,15 +233,31 @@ func TestIndexPresentRebuildsInPlaceWithoutAsking(t *testing.T) {
 	}
 }
 
-// TestIndexPresentRefusesAnObjectSchema — the parameterised form is deliberately out of
-// this version, because the read-back reports only `data_type` and a half-compared
-// index would report converged on a collection that is not.
+// TestIndexPresentRefusesAnUnknownSchema — a misspelled schema name is refused by
+// Validate rather than sent to Qdrant.
 func TestIndexPresentRefusesAnUnknownSchema(t *testing.T) {
 	reply := runValidate(t, moduleWith(newFakeAPI(t)).index(), "present",
 		baseParams(map[string]any{"collection": "docs", "field": "tenant", "schema": "kwyword"}))
 
 	if reply.GetOk() {
 		t.Error("a schema outside the managed set must be refused by Validate")
+	}
+}
+
+// TestIndexPresentRefusesAnObjectSchema — Qdrant's object schema form (a text index
+// with a tokenizer) is deliberately out of this version: the read-back reports only
+// `data_type`, so this module could not tell one tokenizer from another and would
+// report converged on an index that is not. It is refused by the declared type, which
+// is a different mechanism from the unknown-name case above — hence its own test.
+func TestIndexPresentRefusesAnObjectSchema(t *testing.T) {
+	reply := runValidate(t, moduleWith(newFakeAPI(t)).index(), "present",
+		baseParams(map[string]any{
+			"collection": "docs", "field": "body",
+			"schema": map[string]any{"type": "text", "tokenizer": "word"},
+		}))
+
+	if reply.GetOk() {
+		t.Error("an object-valued schema must be refused: only the plain string forms can be compared exactly")
 	}
 }
 

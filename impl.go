@@ -40,6 +40,13 @@
 // change on a live collection is refused up front rather than sent and hoped for
 // (collection.go).
 //
+// One honest exception to the first, and it is a property of the subject rather than a
+// shortcut taken here: `snapshot.created` reports the snapshot it just took. A snapshot
+// has no declared identity to diff against — Qdrant names it after the moment it was
+// made — so "did this run create one" is answered by whether one was created.
+// `max_age_sec` is what gives that action a convergent reading instead; snapshot.go
+// says so at length.
+//
 // Intentionally without dry-run preview: the plugin is on BaseModule and does NOT
 // implement PlanReadSafe, so the host applies default-deny — on dry_run a task gets an
 // honest "drift not supported" instead of a false "no drift" (decision 2026-06-22,
