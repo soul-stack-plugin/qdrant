@@ -149,23 +149,47 @@ var collectionFields = []collectionField{
 	},
 }
 
-// vectorFields classifies the keys INSIDE one vector's parameters. Same rule as
-// above: a key absent from this map is not managed, a key mapped to false is
-// creation-only and a difference in it is refused.
+// vectorField classifies one key INSIDE a vector's parameters — the same three
+// questions [collectionField] answers for a top-level setting, minus the paths, which
+// for a vector are always the same shape.
+type vectorField struct {
+	// mutable — reachable through the collection update. false means creation-only,
+	// so a difference is refused rather than sent.
+	mutable bool
+
+	// liveDefault is what an ABSENT live value means, and it exists for the same
+	// reason `sharding_method` needs one above. Qdrant echoes a vector key back only
+	// when it was set explicitly, so a declaration that spells the default out reads
+	// as drift against a collection that already has exactly that — and on a
+	// creation-only key that drift is a conflict, which under `recreated` DESTROYS
+	// the collection to reach a configuration it already had.
+	liveDefault any
+}
+
+// vectorFields is the managed surface of one vector.
 //
 // `size` and `distance` are the two that matter in practice: they are what an author
-// changes when the embedding model changes, they are exactly what cannot be changed
-// in place, and Qdrant accepts an update to either without doing anything.
-var vectorFields = map[string]bool{
-	"size":               false,
-	"distance":           false,
-	"datatype":           false,
-	"multivector_config": false,
+// changes when the embedding model changes, they are exactly what cannot be changed in
+// place, and Qdrant accepts an update to either without doing anything.
+//
+// `memory` is deliberately ABSENT even though Qdrant's VectorParamsDiff lists it.
+// Measured on a live 1.18.3: a PATCH carrying it answers 200 and the key is never
+// echoed back in `params.vectors`, whether it was patched or set at creation. This
+// module decides `changed` by reading the resource back, so a key it cannot read is a
+// key it cannot honestly manage — declaring it would fail the read-back on every run
+// and blame the author's declaration. Same reasoning as the object form of a payload
+// index schema (index.go): a half-compared setting is worse than an unsupported one.
+var vectorFields = map[string]vectorField{
+	"size":               {},
+	"distance":           {},
+	"multivector_config": {},
+	// Omitted from the live config unless it was declared, and float32 is what
+	// Qdrant stores without one.
+	"datatype": {liveDefault: "float32"},
 
-	"hnsw_config":         true,
-	"quantization_config": true,
-	"on_disk":             true,
-	"memory":              true,
+	"hnsw_config":         {mutable: true},
+	"quantization_config": {mutable: true},
+	"on_disk":             {mutable: true},
 }
 
 // conflict is one declared setting Qdrant cannot reconcile on a live collection.
@@ -312,6 +336,19 @@ func planVectors(declared map[string]any, live map[string]any, plan *collectionP
 		wantVec := want[name]
 		gotVec, exists := got[name]
 		if !exists {
+			// The UNNAMED vector is not addable: the add endpoint puts the name in
+			// the URL path, so an empty one addresses `/vectors/` and answers 404
+			// (measured). Reaching here with it means the live collection has no
+			// unnamed vector to match — a collection built on named or sparse
+			// vectors — and that is a disagreement about the layout, not a vector to
+			// create. The form check above misses it when the live set is EMPTY,
+			// which is what a sparse-only collection reports.
+			if name == "" {
+				plan.conflicts = append(plan.conflicts, conflict{
+					path: "params.vectors", live: vectorNames(got), declared: vectorNames(want),
+				})
+				continue
+			}
 			// A named vector the collection does not have yet is added in place:
 			// Qdrant has an endpoint for exactly that and it destroys nothing — the
 			// existing points simply hold no value for it.
@@ -332,17 +369,21 @@ func planVectors(declared map[string]any, live map[string]any, plan *collectionP
 			continue
 		}
 		for _, key := range sortedKeys(wantVec) {
-			mutable, managed := vectorFields[key]
+			field, managed := vectorFields[key]
 			if !managed {
 				continue
 			}
-			if subsetEquals(wantVec[key], gotVec[key]) {
+			live := gotVec[key]
+			if live == nil {
+				live = field.liveDefault
+			}
+			if subsetEquals(wantVec[key], live) {
 				continue
 			}
 			path := fmt.Sprintf("params.vectors.%s.%s", quoteVectorName(name), key)
-			if !mutable {
+			if !field.mutable {
 				plan.conflicts = append(plan.conflicts, conflict{
-					path: path, live: gotVec[key], declared: wantVec[key],
+					path: path, live: live, declared: wantVec[key],
 				})
 				continue
 			}
@@ -372,11 +413,11 @@ func planVectors(declared map[string]any, live map[string]any, plan *collectionP
 func splitVectorSpec(spec map[string]any) (create, tune map[string]any) {
 	create, tune = map[string]any{}, map[string]any{}
 	for key, value := range spec {
-		mutable, managed := vectorFields[key]
+		field, managed := vectorFields[key]
 		if !managed {
 			continue
 		}
-		if mutable {
+		if field.mutable {
 			tune[key] = value
 			continue
 		}

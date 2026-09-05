@@ -222,8 +222,11 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 	}
 
 	if plan.empty() {
+		// `exists` too, and for the same reason the absent branch of `probed` carries
+		// the full set: a gate written against a key must find it on EVERY run, and
+		// the converged run is the one it will meet most often.
 		return sendOutcome(stream, false, fmt.Sprintf("collection %q is already in the declared shape", name), map[string]any{
-			"name": name, "created": false, "recreated": false,
+			"name": name, "exists": true, "created": false, "recreated": false,
 		})
 	}
 

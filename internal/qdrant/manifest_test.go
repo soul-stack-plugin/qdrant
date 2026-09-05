@@ -1,20 +1,23 @@
-// Guard on the schema document ↔ implementation contract (NIM-206, NIM-525, NIM-766).
+// Guards on the schema document ↔ implementation contract.
 //
 // `modules[<object>].states.<action>.input` is the ONLY thing param-level strictness
-// reads (ADR-0076, NIM-163): a key a state omits has no declaration, so a legitimate
-// call carrying it FAILS with module.unknown_param. A prose promise in a comment is
-// not a declaration.
+// reads: a key a state omits has no declaration, so a legitimate call carrying it fails
+// with module.unknown_param. A prose promise in a comment is not a declaration, which
+// is what these guards exist to keep true.
 //
-// The document is GENERATED from the Go value (`Bundle`), not written beside it:
-// `soul-mod stamp` runs the artifact's `schema` subcommand and writes those bytes both
-// into the binary and to `schema.json`. TestPublishedSchemaMatchesTheBundle is the
-// local half of that guard; `make check-plugin-schema` is the other half.
+// The document is RENDERED FROM THE GO VALUE here, not read off disk — this repository
+// commits no schema.json (bundle.go). That makes the guards assert the contract the
+// binary will actually carry. It also means the canonical-bytes check below no longer
+// proves what its ancestor did: it can only catch a regression in the SDK serializer,
+// not a hand edit of a published file, because there is no published file to edit. What
+// catches a stale stamp is `make verify` on a freshly built artifact, in CI on both
+// architectures.
 //
-// The halves are checked together on purpose. TestConnectParamsAreRead proves the key
-// list below is what the Go parse path actually reads (a rename in conn.go/tls.go
-// breaks it); TestManifestStatesDeclareWhatTheyAccept proves every state declares
-// exactly those plus its own; and TestDeclaredStatesAreDispatched proves the object
-// that SERVES a state is the one that DECLARES it.
+// The three halves are checked together on purpose. TestConnectParamsAreRead proves the
+// key list below is the one the Go parse path actually reads; TestManifestStatesDeclare-
+// WhatTheyAccept proves every state declares exactly those plus its own; and
+// TestDeclaredStatesAreDispatched proves the object that SERVES a state is the one that
+// DECLARES it.
 package qdrant
 
 import (

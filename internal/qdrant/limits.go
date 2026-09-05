@@ -34,10 +34,8 @@ type bound struct {
 	integer bool
 }
 
-func atLeast(v float64) bound       { return bound{min: &v, integer: true} }
 func between(lo, hi float64) bound  { return bound{min: &lo, max: &hi, integer: true} }
 func fraction(lo, hi float64) bound { return bound{min: &lo, max: &hi} }
-func atLeastAny(v float64) bound    { return bound{min: &v} }
 func describe(b bound, got float64) string {
 	switch {
 	case b.min != nil && b.max != nil:
@@ -50,11 +48,24 @@ func describe(b bound, got float64) string {
 	return ""
 }
 
-// topLevelBounds are the scalar params of a collection.
+// maxUint32 / maxUint64Safe are the ceilings Qdrant's own integer formats impose.
+// Without them a value that merely looks large is a 400 "expected u32" — which after
+// `recreated` has already dropped the collection is a destroyed collection.
+//
+// maxUint64Safe is 2^53, not 2^64: every number arrives here as a float64 through both
+// structpb and encoding/json, so anything above that has already lost precision and no
+// bound stated in float64 could be honest about it.
+const (
+	maxUint32     = 4294967295
+	maxUint64Safe = 9007199254740992
+)
+
+// topLevelBounds are the scalar params of a collection. All three are uint32 in
+// Qdrant's schema, so both ends are real.
 var topLevelBounds = map[string]bound{
-	"shard_number":             atLeast(1),
-	"replication_factor":       atLeast(1),
-	"write_consistency_factor": atLeast(1),
+	"shard_number":             between(1, maxUint32),
+	"replication_factor":       between(1, maxUint32),
+	"write_consistency_factor": between(1, maxUint32),
 }
 
 // vectorBounds are the keys inside one vector's parameters.
@@ -62,25 +73,36 @@ var vectorBounds = map[string]bound{
 	"size": between(1, 65536),
 }
 
-// nestedBounds are the keys inside the passthrough config maps. Qdrant checks these
-// too, and a value below the floor is a 400 on the create — which after a drop is a
-// destroyed collection.
+// nestedBounds are the keys inside the passthrough config maps.
+//
+// wal_config is here for the reason this whole file exists rather than for symmetry:
+// it is one of the settings Qdrant CANNOT change on a live collection, so a difference
+// in it is exactly what sends `recreated` to the DELETE. A bad value there is the
+// shortest path from a typo to a destroyed collection —
+// `wal_config: {wal_capacity_mb: 0}` answers 422 "must be 1 or larger", measured, and
+// that answer arrives after the drop.
 var nestedBounds = map[string]map[string]bound{
 	"hnsw_config": {
-		"m":                    atLeast(0),
-		"ef_construct":         atLeast(4),
-		"full_scan_threshold":  atLeast(10),
-		"max_indexing_threads": atLeast(0),
-		"payload_m":            atLeast(0),
+		"m":                    between(0, maxUint64Safe),
+		"ef_construct":         between(4, maxUint64Safe),
+		"full_scan_threshold":  between(10, maxUint64Safe),
+		"max_indexing_threads": between(0, maxUint64Safe),
+		"payload_m":            between(0, maxUint64Safe),
 	},
 	"optimizers_config": {
 		"deleted_threshold":        fraction(0, 1),
-		"vacuum_min_vector_number": atLeast(100),
-		"default_segment_number":   atLeast(0),
-		"max_segment_size":         atLeast(1),
-		"memmap_threshold":         atLeast(0),
-		"indexing_threshold":       atLeast(0),
-		"flush_interval_sec":       atLeastAny(0),
+		"vacuum_min_vector_number": between(100, maxUint64Safe),
+		"default_segment_number":   between(0, maxUint64Safe),
+		"max_segment_size":         between(1, maxUint64Safe),
+		"memmap_threshold":         between(0, maxUint64Safe),
+		"indexing_threshold":       between(0, maxUint64Safe),
+		// u64 in Qdrant's schema: a fractional value is a 400, not a rounded one.
+		"flush_interval_sec": between(0, maxUint64Safe),
+	},
+	"wal_config": {
+		"wal_capacity_mb":    between(1, maxUint32),
+		"wal_segments_ahead": between(0, maxUint32),
+		"wal_retain_closed":  between(0, maxUint32),
 	},
 }
 
