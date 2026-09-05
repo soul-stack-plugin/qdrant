@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // bound is one numeric constraint. Absent min/max mean unbounded on that side.
@@ -102,8 +103,60 @@ var nestedBounds = map[string]map[string]bound{
 	"wal_config": {
 		"wal_capacity_mb":    between(1, maxUint32),
 		"wal_segments_ahead": between(0, maxUint32),
-		"wal_retain_closed":  between(0, maxUint32),
+		// 1, not 0: the floor above comes from Qdrant's UPDATE schema (WalConfigDiff,
+		// minimum 0), and the COLLECTION schema is stricter (WalConfig, minimum 1,
+		// default 1). Zero is not even a clean rejection — measured on 1.18.3 it
+		// panics the server into a 500.
+		"wal_retain_closed": between(1, maxUint32),
 	},
+}
+
+// passthroughKeys is what each managed config map may contain, from Qdrant's own
+// schema (HnswConfigDiff, OptimizersConfigDiff, WalConfigDiff).
+//
+// The reason to check these is not tidiness, it is that Qdrant DISCARDS a key it does
+// not recognise and still answers 200. Inside a mutable map that costs a failed
+// read-back and a clear message. Inside a CREATION-ONLY map — wal_config — it is far
+// worse: the key can never appear in the live config, so it is permanent drift, and
+// permanent drift on a creation-only setting means `recreated` drops and rebuilds the
+// collection on EVERY run. A typo turns a declared state into a scheduled deletion.
+var passthroughKeys = map[string]map[string]bool{
+	"hnsw_config": {
+		"m": true, "ef_construct": true, "full_scan_threshold": true,
+		"max_indexing_threads": true, "on_disk": true, "payload_m": true,
+		"inline_storage": true, "memory": true,
+	},
+	"optimizers_config": {
+		"deleted_threshold": true, "vacuum_min_vector_number": true,
+		"default_segment_number": true, "max_segment_size": true,
+		"memmap_threshold": true, "indexing_threshold": true,
+		"flush_interval_sec": true, "max_optimization_threads": true,
+		"prevent_unoptimized": true,
+	},
+	"wal_config": {
+		"wal_capacity_mb": true, "wal_segments_ahead": true, "wal_retain_closed": true,
+	},
+}
+
+// checkPassthroughKeys reports every key inside a managed config map that Qdrant does
+// not know. Deterministic order.
+func checkPassthroughKeys(declared map[string]any) []string {
+	var errs []string
+	for _, param := range sortedKeys(passthroughKeys) {
+		nested, ok := declared[param].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range sortedKeys(nested) {
+			if passthroughKeys[param][key] {
+				continue
+			}
+			errs = append(errs, fmt.Sprintf(
+				"params.%s.%s: not a setting Qdrant knows (expected %s) — it would be discarded in silence and still answered 200, so it is refused here instead",
+				param, key, strings.Join(sortedKeys(passthroughKeys[param]), ", ")))
+		}
+	}
+	return errs
 }
 
 // checkCollectionBounds reports every declared value outside the range Qdrant accepts,

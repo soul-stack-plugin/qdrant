@@ -110,7 +110,7 @@ func contains(set []string, v string) bool {
 // three states declare it and the description carries the load-bearing warning.
 func vectorsParam() module.Param {
 	return module.Param{Type: module.Map, Required: true,
-		Description: "The collection's vector layout, in either of Qdrant's two spellings: one vector's parameters ({size: 768, distance: Cosine}) or a map of named vectors ({text: {size: 768, distance: Cosine}}). Told apart by a top-level `size`, the same way Qdrant tells them apart. Per vector, `size` and `distance` are required and CANNOT be changed on a live collection — Qdrant accepts such an update and silently discards it, so this module refuses it instead (see the state description). `hnsw_config`, `quantization_config`, `on_disk` and `memory` inside a vector CAN be changed and are reconciled. A named vector that is declared and missing is ADDED in place, which destroys nothing; a named vector that exists and is NOT declared is refused rather than dropped, because dropping it destroys that vector's data.",
+		Description: "The collection's vector layout, in either of Qdrant's two spellings: one vector's parameters ({size: 768, distance: Cosine}) or a map of named vectors ({text: {size: 768, distance: Cosine}}). Told apart by a top-level `size`, the same way Qdrant tells them apart. Per vector, `size` and `distance` are required and CANNOT be changed on a live collection — Qdrant accepts such an update and silently discards it, so this module refuses it instead (see the state description). `hnsw_config`, `quantization_config` and `on_disk` inside a vector CAN be changed and are reconciled. `memory` is NOT managed: Qdrant accepts it and never reports it back, and this module decides `changed` by reading the resource back, so a key it cannot read is one it cannot honestly reconcile — it is refused rather than silently ignored. A named vector that is declared and missing is ADDED in place, which destroys nothing; a named vector that exists and is NOT declared is refused rather than dropped, because dropping it destroys that vector's data.",
 	}
 }
 
@@ -143,7 +143,7 @@ func collectionStates() map[string]module.State {
 			Description: "Collection-level HNSW index settings (m, ef_construct, full_scan_threshold, max_indexing_threads, on_disk, payload_m). Reconciled on a live collection. Only the keys you declare are compared — Qdrant reports this map fully populated with its defaults, so comparing the whole thing would report drift on every run.",
 		},
 		"optimizers_config": {Type: module.Map,
-			Description: "Optimizer settings (deleted_threshold, vacuum_min_vector_number, default_segment_number, max_segment_size, memmap_threshold, indexing_threshold, flush_interval_sec, max_optimization_threads). Reconciled on a live collection. Note Qdrant WRITES this as `optimizers_config` and READS it back as `optimizer_config`; the module handles the two spellings. Only declared keys are compared.",
+			Description: "Optimizer settings (deleted_threshold, vacuum_min_vector_number, default_segment_number, max_segment_size, memmap_threshold, indexing_threshold, flush_interval_sec). A key Qdrant does not know is refused rather than sent — it would be discarded in silence and still answered 200. Reconciled on a live collection. Note Qdrant WRITES this as `optimizers_config` and READS it back as `optimizer_config`; the module handles the two spellings. Only declared keys are compared.",
 		},
 		"quantization_config": {Type: module.Map,
 			Description: "Quantization settings (scalar / product / binary). Reconciled on a live collection. Only declared keys are compared.",
@@ -185,7 +185,7 @@ func collectionStates() map[string]module.State {
 				"line rather than pretending it is not there. `replication_factor`,\n" +
 				"`write_consistency_factor`, `on_disk_payload`, `hnsw_config`,\n" +
 				"`optimizers_config`, `quantization_config` and the per-vector `hnsw_config`/\n" +
-				"`quantization_config`/`on_disk`/`memory` are reconciled in place. A vector's\n" +
+				"`quantization_config`/`on_disk` are reconciled in place. A vector's\n" +
 				"`size` and `distance`, plus `shard_number`, `sharding_method` and\n" +
 				"`wal_config`, exist ONLY at creation time.\n" +
 				"\n" +

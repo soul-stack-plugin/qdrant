@@ -50,10 +50,15 @@ func validateCollectionAbsent(f map[string]*structpb.Value) []string {
 // a validation phase.
 func validateCollectionPresent(f map[string]*structpb.Value) []string {
 	errs := append(validateCollectionProbed(f), validateVectors(f)...)
-	// The numeric bounds Qdrant enforces on a create body (limits.go). Refused here
-	// so a typo stops the run before it starts — and checked AGAIN before the drop in
-	// `recreated`, which is the one path where letting one through costs the data.
-	return append(errs, checkCollectionBounds(declaredCollection(f))...)
+	// The bounds and key sets Qdrant enforces on a create body (limits.go). Refused
+	// here so a typo stops the run before it starts, and checked again before the drop
+	// in `recreated`. Neither is the safety mechanism any more — precheckCreateBody
+	// asks the server itself — but a misspelled key inside a CREATION-ONLY map still
+	// has to be caught by name, because Qdrant accepts and discards it, which makes it
+	// permanent drift and turns `recreated` into a deletion on every run.
+	declared := declaredCollection(f)
+	errs = append(errs, checkCollectionBounds(declared)...)
+	return append(errs, checkPassthroughKeys(declared)...)
 }
 
 // validateCollectionRecreated — as present, plus the explicit authority to destroy.
@@ -203,6 +208,11 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 				"collection %q was NOT touched: Qdrant would refuse this declaration, and this state drops the collection BEFORE it creates it — %s",
 				name, strings.Join(errs, "; ")))
 		}
+		// And then ask the server itself, because the bounds above can only cover what
+		// this build was taught. Nothing has been destroyed at this point.
+		if err := m.precheckCreateBody(ctx, api, name, createBody(declared), apiKey); err != nil {
+			return sendFailure(stream, fmt.Sprintf("collection %q was NOT touched: %s", name, err.Error()))
+		}
 		if err := m.dropCollection(ctx, api, name, apiKey); err != nil {
 			return sendFailure(stream, err.Error())
 		}
@@ -277,6 +287,53 @@ func (m *Module) verifyCollection(ctx context.Context, stream eventStream, api q
 	output["name"] = name
 	output["exists"] = true
 	return sendOutcome(stream, true, message, output)
+}
+
+// precheckCreateBody proves the declared create body is acceptable to THIS server —
+// by building it under a throwaway name and removing it again — BEFORE anything
+// destructive happens.
+//
+// # Why this exists rather than a longer table of bounds
+//
+// `recreated` drops the collection and then creates it. Qdrant has no dry-run create,
+// so everything the create might be refused for has to be known in advance, and three
+// independent reviews found three more ways to be refused that limits.go did not
+// know: a floor taken from the update schema where the collection schema has a
+// stricter one (`wal_retain_closed: 0` is not even a 400 — it panics the server into a
+// 500), a misspelled enum on a creation-only key, and a wrong-typed leaf inside a
+// passthrough map. Every round of enumeration found another one, which is the signal
+// that enumeration is the wrong instrument: the set of things a given Qdrant build
+// refuses is Qdrant's to know, not this module's to predict.
+//
+// So the module stops predicting and asks. The probe costs one create and one delete
+// of an EMPTY collection, and it converts every present and future validation rule of
+// Qdrant's — including ones added in versions this code has never seen — into a
+// refusal that happens while the real collection is still there.
+//
+// limits.go is still worth keeping in front of it: it turns the common typo into a
+// message that names the parameter, instead of a 400 relayed from the server.
+func (m *Module) precheckCreateBody(ctx context.Context, api qdrantAPI, name string, body map[string]any, apiKey string) error {
+	probe := name + "__ss_precheck"
+
+	// Never touch a collection that is already there — the name is unlikely, but
+	// "unlikely" is not a licence to delete someone's data.
+	if _, exists, err := readCollection(ctx, api, probe, apiKey); err != nil {
+		return fmt.Errorf("could not check for the pre-flight collection: %s", err.Error())
+	} else if exists {
+		return fmt.Errorf("a collection named %q already exists, so the pre-flight that proves this declaration is buildable cannot run; remove it and re-run", probe)
+	}
+
+	if err := m.createCollection(ctx, api, probe, body, apiKey); err != nil {
+		return fmt.Errorf("Qdrant would refuse this declaration, and this state drops the collection before it creates it — %s", err.Error())
+	}
+
+	if err := m.dropCollection(ctx, api, probe, apiKey); err != nil {
+		// The declaration is fine, but a leftover would collide with the next run.
+		// Stop rather than proceed: whatever prevents a delete now would prevent the
+		// real one in a moment.
+		return fmt.Errorf("the pre-flight collection %q could not be removed and is still there: %s", probe, err.Error())
+	}
+	return nil
 }
 
 // applyCollectionAbsent removes a collection. Idempotent: one that is not there is a

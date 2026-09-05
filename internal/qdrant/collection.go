@@ -189,7 +189,10 @@ var vectorFields = map[string]vectorField{
 
 	"hnsw_config":         {mutable: true},
 	"quantization_config": {mutable: true},
-	"on_disk":             {mutable: true},
+	// Echoed only when it was set explicitly, like datatype above. Being mutable
+	// this costs a pointless PATCH rather than a drop, but a state that reports
+	// changed=true for a setting the collection already had is still lying.
+	"on_disk": {mutable: true, liveDefault: false},
 }
 
 // conflict is one declared setting Qdrant cannot reconcile on a live collection.

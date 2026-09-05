@@ -162,6 +162,11 @@ func TestRecreatedRefusesOutOfRangeBeforeDroppingAnything(t *testing.T) {
 func TestRecreatedSaysTheDataIsGoneWhenTheRebuildFails(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil))).
+		// The pre-flight passes — this is the case it cannot cover: the body is
+		// acceptable, and the real create fails for a reason no check predicts.
+		on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
+		on("PUT", "/collections/docs__ss_precheck", okTrue(t)).
+		on("DELETE", "/collections/docs__ss_precheck", okTrue(t)).
 		on("DELETE", "/collections/docs", okTrue(t)).
 		on("PUT", "/collections/docs", errorResult(503, "service unavailable"))
 

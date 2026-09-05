@@ -195,6 +195,11 @@ func TestCollectionRecreatedOnlyDropsOnConflict(t *testing.T) {
 			on("GET", "/collections/docs",
 				liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil)),
 				liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil))).
+			// The pre-flight: the declared body is built under a throwaway name and
+			// removed again before anything real is dropped.
+			on("GET", "/collections/docs__ss_precheck", notFoundResult("Collection `docs__ss_precheck` doesn't exist!")).
+			on("PUT", "/collections/docs__ss_precheck", okTrue(t)).
+			on("DELETE", "/collections/docs__ss_precheck", okTrue(t)).
 			on("DELETE", "/collections/docs", okTrue(t)).
 			on("PUT", "/collections/docs", okTrue(t))
 
@@ -211,9 +216,13 @@ func TestCollectionRecreatedOnlyDropsOnConflict(t *testing.T) {
 			t.Error("a rebuild must report changed=true")
 		}
 
+		// Only the calls against the REAL collection: the pre-flight builds and
+		// removes a throwaway one first, and that is the point of it.
 		var order []string
 		for _, c := range api.mutating() {
-			order = append(order, c.method)
+			if c.path == "/collections/docs" {
+				order = append(order, c.method)
+			}
 		}
 		if len(order) != 2 || order[0] != "DELETE" || order[1] != "PUT" {
 			t.Errorf("a rebuild is a DELETE then a PUT, got %v", order)

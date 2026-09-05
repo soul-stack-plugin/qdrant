@@ -68,7 +68,7 @@ request bodies, and encoded once in `collectionFields` / `vectorFields`
 
 **Reconciled in place:** `replication_factor`, `write_consistency_factor`,
 `on_disk_payload`, `hnsw_config`, `optimizers_config`, `quantization_config`, and per
-vector `hnsw_config` / `quantization_config` / `on_disk` / `memory`.
+vector `hnsw_config` / `quantization_config` / `on_disk`.
 
 **Creation-only — reaching it destroys the collection's contents:** a vector's `size`,
 `distance`, `datatype` and `multivector_config`; `shard_number`; `sharding_method`;
@@ -77,6 +77,16 @@ vector `hnsw_config` / `quantization_config` / `on_disk` / `memory`.
 **Named vectors are a special case.** Adding one is done in place — Qdrant has an
 endpoint for it and it destroys nothing. Dropping one is refused, because it destroys
 that vector's data.
+
+A vector's `memory` is deliberately **not** managed, although Qdrant's schema lists it:
+a live 1.18.3 accepts it and never reports it back, and this module decides `changed` by
+reading the resource back — a key it cannot read is one it cannot honestly reconcile.
+
+Before `collection.recreated` drops anything it builds the declared configuration under
+a throwaway name and removes it again. Qdrant has no dry-run create and its validation
+rules cannot be enumerated here reliably — three reviews found three more of them, one
+of which panics the server rather than returning an error — so the module asks the
+server instead of predicting it. Nothing is destroyed until the body has been accepted.
 
 `collection.present` refuses on the creation-only half. `collection.recreated` is the
 separate, explicit state that may drop and rebuild; it requires `confirm_destroy: true`
