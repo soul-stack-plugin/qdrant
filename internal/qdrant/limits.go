@@ -1,24 +1,22 @@
-// The numeric bounds Qdrant enforces on a create body, checked here BEFORE anything
-// is sent.
+// The numeric bounds and key sets Qdrant enforces on a create body, checked here
+// BEFORE anything is sent.
 //
-// # Why this file exists, and why it is not merely tidy
+// These exist so a mistake is refused with a message that names the parameter, instead
+// of arriving as a 400 relayed from the server halfway through a run. `collection.
+// present` creates a collection when one is missing, and a body Qdrant rejects fails
+// that create.
 //
-// `collection.recreated` DROPS the collection and then creates it again. Those are two
-// requests, and nothing rolls the first one back. If the create is refused — a
-// `shard_number: 0`, a vector `size` above Qdrant's ceiling, an `ef_construct` below
-// its floor — the collection and every point in it are already gone, and the run ends
-// with a 400 and nothing to rebuild from.
+// The key sets earn their place for a sharper reason than the bounds. Qdrant ACCEPTS a
+// key it does not recognise, discards it, and still answers 200 — so a misspelled
+// setting inside a passthrough map is drift this module can never reconcile and would
+// report on every single run, blaming a declaration that looks correct. Refusing it by
+// name is the only way an author finds out.
 //
-// That is the one place where this artifact's own rule (refuse before the first
-// mutating request) can be violated by a value that Validate let through. Qdrant has no
-// dry-run create, so the only defence is to check what Qdrant documents it will refuse,
-// and to check it in Validate AND before the drop.
-//
-// The bounds below are Qdrant's own, read out of its OpenAPI schema (`minimum` /
-// `maximum` on CreateCollection, CollectionParams, VectorParams, HnswConfigDiff and
-// OptimizersConfigDiff) and confirmed against 1.18.3. They are deliberately NOT
+// The bounds are Qdrant's own, read out of its OpenAPI schema (`minimum` / `maximum` on
+// CreateCollection, CollectionParams, VectorParams, HnswConfigDiff, OptimizersConfigDiff
+// and WalConfig) and confirmed against a live 1.18.3. They are deliberately NOT
 // invented: a bound this module made up would reject a declaration a future Qdrant
-// accepts, which is the opposite failure and just as annoying.
+// accepts, which is the opposite failure and just as obstructive.
 package qdrant
 
 import (
@@ -50,8 +48,7 @@ func describe(b bound, got float64) string {
 }
 
 // maxUint32 / maxUint64Safe are the ceilings Qdrant's own integer formats impose.
-// Without them a value that merely looks large is a 400 "expected u32" — which after
-// `recreated` has already dropped the collection is a destroyed collection.
+// Without them a value that merely looks large is a 400 "expected u32" from the create.
 //
 // maxUint64Safe is 2^53, not 2^64: every number arrives here as a float64 through both
 // structpb and encoding/json, so anything above that has already lost precision and no
@@ -76,12 +73,9 @@ var vectorBounds = map[string]bound{
 
 // nestedBounds are the keys inside the passthrough config maps.
 //
-// wal_config is here for the reason this whole file exists rather than for symmetry:
-// it is one of the settings Qdrant CANNOT change on a live collection, so a difference
-// in it is exactly what sends `recreated` to the DELETE. A bad value there is the
-// shortest path from a typo to a destroyed collection —
-// `wal_config: {wal_capacity_mb: 0}` answers 422 "must be 1 or larger", measured, and
-// that answer arrives after the drop.
+// `wal_config: {wal_capacity_mb: 0}` answers 422 "must be 1 or larger" and
+// `wal_retain_closed: 0` panics the server into a 500 — both measured on 1.18.3, and
+// both are what a create would return.
 var nestedBounds = map[string]map[string]bound{
 	"hnsw_config": {
 		"m":                    between(0, maxUint64Safe),
@@ -118,8 +112,8 @@ var nestedBounds = map[string]map[string]bound{
 // not recognise and still answers 200. Inside a mutable map that costs a failed
 // read-back and a clear message. Inside a CREATION-ONLY map — wal_config — it is far
 // worse: the key can never appear in the live config, so it is permanent drift, and
-// permanent drift on a creation-only setting means `recreated` drops and rebuilds the
-// collection on EVERY run. A typo turns a declared state into a scheduled deletion.
+// `present` will refuse the declaration for ever on a collection that is otherwise
+// exactly right.
 var passthroughKeys = map[string]map[string]bool{
 	"hnsw_config": {
 		"m": true, "ef_construct": true, "full_scan_threshold": true,
@@ -136,8 +130,8 @@ var passthroughKeys = map[string]map[string]bool{
 	"wal_config": {
 		"wal_capacity_mb": true, "wal_segments_ahead": true, "wal_retain_closed": true,
 	},
-	// Per-vector and CREATION-ONLY: an unknown key here is permanent drift, and
-	// permanent drift on a creation-only setting is a rebuild on every run.
+	// Per-vector and CREATION-ONLY: an unknown key here is permanent drift, and on a
+	// creation-only setting that is a permanent refusal.
 	"multivector_config": {
 		"comparator": true,
 	},
@@ -155,8 +149,8 @@ func checkPassthroughKeys(declared map[string]any) []string {
 
 	// And INSIDE each vector, which is where the worst instance lives:
 	// `multivector_config` is creation-only, so an unknown key in it is permanent
-	// drift, and permanent drift on a creation-only setting makes `recreated` drop
-	// and rebuild on every single run.
+	// drift, and permanent drift on a creation-only setting is a declaration `present`
+	// can never satisfy.
 	if raw, ok := declared["vectors"]; ok {
 		vectors := normalizeVectors(raw)
 		for _, name := range sortedKeys(vectors) {

@@ -31,7 +31,6 @@ func allObjects(m *Module) []struct {
 		{"collection", "probed", map[string]any{"name": "docs"}},
 		{"collection", "absent", map[string]any{"name": "docs"}},
 		{"collection", "present", map[string]any{"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"}}},
-		{"collection", "recreated", map[string]any{"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"}, "confirm_destroy": true}},
 		{"alias", "present", map[string]any{"name": "live", "collection": "docs"}},
 		{"alias", "absent", map[string]any{"name": "live"}},
 		{"index", "present", map[string]any{"collection": "docs", "field": "tenant", "schema": "keyword"}},
@@ -151,14 +150,9 @@ func TestValidateRefusesEverythingApplyRefuses(t *testing.T) {
 			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "cosine"}})},
 		{"vector with an unmanaged key", "collection", "present", baseParams(map[string]any{
 			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine", "tokenizer": "word"}})},
-		{"recreated without confirm_destroy", "collection", "recreated", baseParams(map[string]any{
-			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"}})},
-		{"recreated with confirm_destroy false", "collection", "recreated", baseParams(map[string]any{
-			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"}, "confirm_destroy": false})},
-		// NIM-778 aimed at the one parameter standing between a scenario and the loss
-		// of a collection: "yes" must be refused, not read as true.
-		{"recreated with confirm_destroy of the wrong type", "collection", "recreated", baseParams(map[string]any{
-			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"}, "confirm_destroy": "yes"})},
+		{"unknown key inside a passthrough map", "collection", "present", baseParams(map[string]any{
+			"name": "docs", "vectors": map[string]any{"size": 4, "distance": "Cosine"},
+			"wal_config": map[string]any{"wal_capacity_mbb": 64}})},
 		{"alias without a target", "alias", "present", baseParams(map[string]any{"name": "live"})},
 		{"index with an unknown schema", "index", "present", baseParams(map[string]any{
 			"collection": "docs", "field": "tenant", "schema": "keywords"})},
@@ -200,7 +194,7 @@ func TestUnknownStateNamesTheObject(t *testing.T) {
 		t.Fatal("Validate accepted an unknown state")
 	}
 	msg := strings.Join(reply.GetErrors(), "; ")
-	for _, want := range []string{"presnt", "collection", "present", "recreated"} {
+	for _, want := range []string{"presnt", "collection", "present"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the message must mention %q: %s", want, msg)
 		}

@@ -29,8 +29,11 @@
 //
 // Hence the shape of `present`: the immutable half is compared and REFUSED before
 // anything is sent, and the mutable half is verified by reading the collection back
-// rather than by believing the response. `recreated` is the same code with the
-// authority to drop and rebuild, taken explicitly through confirm_destroy.
+// rather than by believing the response. There is NO state here that rebuilds a
+// collection: four independent reviews each found a fresh way for a drop-then-create to
+// destroy data it could not restore, so v1 offers the refusal and nothing else. An
+// operator who wants the rebuild does it deliberately, with qdrant.collection.absent
+// followed by qdrant.collection.present, having taken a snapshot first.
 //
 // # Comparison is by DECLARED keys only
 //
@@ -161,8 +164,8 @@ type vectorField struct {
 	// reason `sharding_method` needs one above. Qdrant echoes a vector key back only
 	// when it was set explicitly, so a declaration that spells the default out reads
 	// as drift against a collection that already has exactly that — and on a
-	// creation-only key that drift is a conflict, which under `recreated` DESTROYS
-	// the collection to reach a configuration it already had.
+	// creation-only key that drift is a conflict — a permanent refusal of a
+	// declaration the collection already satisfies.
 	liveDefault any
 }
 
@@ -249,7 +252,7 @@ func renderValue(v any) string {
 // read of the live collection BEFORE anything is sent.
 type collectionPlan struct {
 	// conflicts are the settings that cannot be reached on the live collection.
-	// Non-empty means `present` refuses and `recreated` rebuilds.
+	// Non-empty means `present` refuses: the declared shape is not reachable.
 	conflicts []conflict
 
 	// patch is the UpdateCollection body, empty when the mutable half already

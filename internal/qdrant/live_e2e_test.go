@@ -193,8 +193,14 @@ func TestLivePresentRefusesAnImmutableChangeAndTouchesNothing(t *testing.T) {
 			if !strings.Contains(event.GetMessage(), tc.wantHit) {
 				t.Errorf("the refusal must name %s:\n%s", tc.wantHit, event.GetMessage())
 			}
-			if !strings.Contains(event.GetMessage(), "recreated") {
-				t.Errorf("the refusal must point at the state that can do it:\n%s", event.GetMessage())
+			// The refusal has to leave the author with a way forward. This module
+			// ships no state that rebuilds a collection, so the way forward is three
+			// declarations that each say what they do — and the snapshot has to come
+			// first, or the advice is a data-loss instruction.
+			for _, want := range []string{"snapshot", "absent", "present"} {
+				if !strings.Contains(event.GetMessage(), want) {
+					t.Errorf("the refusal must say what to do instead (%q missing):\n%s", want, event.GetMessage())
+				}
 			}
 		})
 	}
@@ -209,57 +215,6 @@ func TestLivePresentRefusesAnImmutableChangeAndTouchesNothing(t *testing.T) {
 	if settled.GetFailed() || settled.GetChanged() {
 		t.Errorf("the collection was disturbed by the refusals: failed=%v changed=%v %s",
 			settled.GetFailed(), settled.GetChanged(), settled.GetMessage())
-	}
-}
-
-// TestLiveRecreatedRebuildsOnlyWhenItMustProvesTheSizeActuallyChanges — the other half:
-// `recreated` really does reach a shape `present` cannot, and really does leave the
-// collection alone when there is nothing it must destroy.
-func TestLiveRecreatedRebuildsOnlyWhenItMustProvesTheSizeActuallyChanges(t *testing.T) {
-	const name = "ss_live_recreated"
-	obj := liveModule().collection()
-	dropLive(t, name)
-	t.Cleanup(func() { dropLive(t, name) })
-
-	four := liveParams(t, map[string]any{
-		"name": name, "vectors": map[string]any{"size": 4, "distance": "Cosine"},
-		"confirm_destroy": true,
-	})
-	if e := runApply(t, obj, "recreated", four).final(); e.GetFailed() {
-		t.Fatalf("create through recreated failed: %s", e.GetMessage())
-	}
-
-	// ★ On a matching collection it must do NOTHING. A `recreated` that rebuilt every
-	// run would be a scheduled data loss.
-	noop := runApply(t, obj, "recreated", four).final()
-	if noop.GetFailed() {
-		t.Fatalf("recreated failed on a matching collection: %s", noop.GetMessage())
-	}
-	if noop.GetChanged() {
-		t.Fatalf("recreated rebuilt a collection that already matched — that is data loss on every run: %s", noop.GetMessage())
-	}
-
-	// Now ask for something only a rebuild can deliver.
-	eight := liveParams(t, map[string]any{
-		"name": name, "vectors": map[string]any{"size": 8, "distance": "Cosine"},
-		"confirm_destroy": true,
-	})
-	rebuilt := runApply(t, obj, "recreated", eight).final()
-	if rebuilt.GetFailed() {
-		t.Fatalf("recreated failed on a real conflict: %s", rebuilt.GetMessage())
-	}
-	if !rebuilt.GetChanged() {
-		t.Error("a rebuild must report changed=true")
-	}
-	if !rebuilt.GetOutput().GetFields()["recreated"].GetBoolValue() {
-		t.Error("Output.recreated must say so")
-	}
-
-	// And the size really is 8 now — the read-back guard inside Apply would have
-	// caught it, but this is the assertion that the guard itself is not vacuous.
-	settled := runApply(t, obj, "recreated", eight).final()
-	if settled.GetChanged() {
-		t.Errorf("the rebuilt collection did not converge: %s", settled.GetMessage())
 	}
 }
 

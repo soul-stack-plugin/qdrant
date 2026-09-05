@@ -13,8 +13,8 @@ import (
 // without one reports `{size, distance}`, and stores float32.
 //
 // So a declaration that spells the default out used to read as drift on a
-// creation-only key — a conflict. Under `present` that is a permanent refusal; under
-// `recreated` it DROPS THE COLLECTION to reach a configuration it already had.
+// creation-only key — a conflict, which is a PERMANENT refusal of a declaration the
+// collection already satisfies.
 func TestDeclaringAVectorDefaultIsNotDrift(t *testing.T) {
 	plan := planCollection(
 		map[string]any{"vectors": map[string]any{
@@ -48,18 +48,17 @@ func TestADifferentDatatypeIsStillAConflict(t *testing.T) {
 	}
 }
 
-// TestRecreatedDoesNotDropForADeclaredDefault is the same fact asserted where it costs
-// data: through Apply, on the state that destroys.
-func TestRecreatedDoesNotDropForADeclaredDefault(t *testing.T) {
+// TestPresentDoesNotRefuseADeclaredDefault is the same fact asserted where an author
+// meets it: through Apply, on the state they actually write.
+func TestPresentDoesNotRefuseADeclaredDefault(t *testing.T) {
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil)))
 
-	stream := runApply(t, moduleWith(api).collection(), "recreated", baseParams(map[string]any{
+	stream := runApply(t, moduleWith(api).collection(), "present", baseParams(map[string]any{
 		"name": "docs",
 		"vectors": map[string]any{
 			"size": 8, "distance": "Cosine", "datatype": "float32",
 		},
-		"confirm_destroy": true,
 	}))
 
 	event := stream.final()
@@ -68,7 +67,7 @@ func TestRecreatedDoesNotDropForADeclaredDefault(t *testing.T) {
 			event.GetFailed(), event.GetChanged(), event.GetMessage())
 	}
 	if sent := api.mutating(); len(sent) != 0 {
-		t.Fatalf("THE COLLECTION WAS DESTROYED to reach a shape it already had: %v", sent)
+		t.Fatalf("a converged run must send nothing, sent %v", sent)
 	}
 }
 
@@ -92,41 +91,18 @@ func TestMemoryIsNotManaged(t *testing.T) {
 	}
 }
 
-// ★ TestWalConfigIsBoundsChecked — wal_config is one of the settings Qdrant cannot
-// change on a live collection, so a difference in it is exactly what sends `recreated`
-// to the DELETE. It had no bounds at all, which made it the shortest path from a typo
-// to a destroyed collection: `wal_capacity_mb: 0` answers 422 "must be 1 or larger",
-// and that answer arrives AFTER the drop.
+// TestWalConfigIsBoundsChecked — `wal_capacity_mb: 0` answers 422 "must be 1 or larger"
+// and `wal_retain_closed: 0` panics the server into a 500, both measured. Either would
+// otherwise arrive as a relayed error from the create.
 func TestWalConfigIsBoundsChecked(t *testing.T) {
 	errs := checkCollectionBounds(map[string]any{
 		"wal_config": map[string]any{"wal_capacity_mb": float64(0)},
 	})
 	if len(errs) == 0 {
-		t.Fatal("wal_capacity_mb 0 must be refused: Qdrant answers 422 and the drop has already happened")
+		t.Fatal("wal_capacity_mb 0 must be refused: Qdrant answers 422 to the create")
 	}
 	if !strings.Contains(errs[0], "params.wal_config.wal_capacity_mb") {
 		t.Errorf("the error must address the field, got %q", errs[0])
-	}
-}
-
-// TestRecreatedRefusesABadWalConfigBeforeDropping — the same through Apply, on the
-// destructive state, asserting the property that matters: nothing was sent.
-func TestRecreatedRefusesABadWalConfigBeforeDropping(t *testing.T) {
-	api := newFakeAPI(t).
-		on("GET", "/collections/docs", liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil)))
-
-	stream := runApply(t, moduleWith(api).collection(), "recreated", baseParams(map[string]any{
-		"name":            "docs",
-		"vectors":         map[string]any{"size": 4, "distance": "Cosine"},
-		"wal_config":      map[string]any{"wal_capacity_mb": 0},
-		"confirm_destroy": true,
-	}))
-
-	if !stream.final().GetFailed() {
-		t.Fatal("a wal_config Qdrant would refuse must stop the run")
-	}
-	if sent := api.mutating(); len(sent) != 0 {
-		t.Fatalf("THE COLLECTION WAS TOUCHED: %v — the create would have failed 422 after this", sent)
 	}
 }
 
@@ -143,8 +119,7 @@ func TestIntegerFieldsRefuseAFraction(t *testing.T) {
 }
 
 // TestIntegerFieldsHaveACeiling — a value that merely looks large is a 400
-// "expected u32", and after `recreated` has dropped the collection that is a destroyed
-// collection.
+// "expected u32" from the create.
 func TestIntegerFieldsHaveACeiling(t *testing.T) {
 	errs := checkCollectionBounds(map[string]any{"shard_number": float64(4294967296)})
 	if len(errs) == 0 {

@@ -26,7 +26,7 @@ bytes registered twice serve two address spaces.
 | object | states | what it manages |
 |---|---|---|
 | `instance` | `pinged` · `ready-probed` · `version-probed` | the server: liveness, readiness, version. Read-only, `changed=false` by design |
-| `collection` | `probed` · `present` · `recreated` · `absent` | one collection and its shape |
+| `collection` | `probed` · `present` · `absent` | one collection and its shape |
 | `alias` | `present` · `absent` | a second name for a collection — what a blue-green swap moves |
 | `index` | `present` · `absent` | one payload field index |
 | `snapshot` | `created` · `absent` | a collection's backups |
@@ -81,17 +81,26 @@ that vector's data.
 A vector's `memory` is deliberately **not** managed, although Qdrant's schema lists it:
 a live 1.18.3 accepts it and never reports it back, and this module decides `changed` by
 reading the resource back — a key it cannot read is one it cannot honestly reconcile.
+The same goes for `hnsw_config.memory`.
 
-Before `collection.recreated` drops anything it builds the declared configuration under
-a throwaway name and removes it again. Qdrant has no dry-run create and its validation
-rules cannot be enumerated here reliably — three reviews found three more of them, one
-of which panics the server rather than returning an error — so the module asks the
-server instead of predicting it. Nothing is destroyed until the body has been accepted.
+### There is no state that rebuilds a collection
 
-`collection.present` refuses on the creation-only half. `collection.recreated` is the
-separate, explicit state that may drop and rebuild; it requires `confirm_destroy: true`
-and, on a collection that already matches, changes nothing — recreating unconditionally
-would destroy the data on every run.
+`collection.present` refuses on the creation-only half and stops there. v1 ships nothing
+that drops and recreates, and that is a decision rather than an omission: four
+independent reviews of this module each found a fresh way for a drop-then-create to
+destroy data it could not then restore — a bound taken from the wrong schema, a value
+that panics the server rather than returning an error, a declared default that read as
+drift, and a name occupied by an alias, where Qdrant resolves the read but not the
+delete. Each fix closed one route and the next review found another.
+
+Reaching a creation-only change therefore stays an operator's deliberate act:
+
+```
+qdrant.snapshot.created   →   qdrant.collection.absent   →   qdrant.collection.present
+```
+
+which is three declarations that each say what they do, instead of one that hides a
+deletion inside a reconciliation.
 
 `index` is the deliberate contrast: it rebuilds a payload index in place without asking,
 because that destroys an *index*, not data. What it costs is a window in which filters

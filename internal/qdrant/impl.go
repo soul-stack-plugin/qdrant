@@ -8,7 +8,7 @@
 //
 //	instance   — pinged / ready-probed / version-probed (read probes,
 //	             changed=false by design, see probe.go)
-//	collection — probed (read), present / recreated / absent (collection.go)
+//	collection — probed (read), present, absent (collection.go)
 //	alias      — present / absent (alias.go)
 //	index      — present / absent (payload field index, index.go)
 //	snapshot   — created / absent (snapshot.go)

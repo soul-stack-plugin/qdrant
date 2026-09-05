@@ -52,7 +52,7 @@ func TestCollectionPresentRefusesBeforeSendingAnything(t *testing.T) {
 	if sent := api.mutating(); len(sent) != 0 {
 		t.Errorf("the refusal must send nothing, but it sent %v", sent)
 	}
-	for _, want := range []string{`params.vectors."".size`, "is 4", "declared 8", "recreated", "confirm_destroy"} {
+	for _, want := range []string{`params.vectors."".size`, "is 4", "declared 8", "snapshot", "absent"} {
 		if !strings.Contains(event.GetMessage(), want) {
 			t.Errorf("the refusal must mention %q:\n%s", want, event.GetMessage())
 		}
@@ -168,104 +168,6 @@ func TestCollectionCreateThatDidNotTakeFails(t *testing.T) {
 	}
 }
 
-// TestCollectionRecreatedOnlyDropsOnConflict — the difference between a state and a
-// scheduled outage. `recreated` on a collection that already matches must leave it
-// alone; recreating unconditionally would destroy the data on every run.
-func TestCollectionRecreatedOnlyDropsOnConflict(t *testing.T) {
-	t.Run("already in the declared shape", func(t *testing.T) {
-		api := newFakeAPI(t).
-			on("GET", "/collections/docs", liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil)))
-
-		stream := runApply(t, moduleWith(api).collection(), "recreated", docsPresent(map[string]any{
-			"confirm_destroy": true,
-		}))
-
-		event := stream.final()
-		if event.GetFailed() || event.GetChanged() {
-			t.Fatalf("a matching collection must be left alone: failed=%v changed=%v %s",
-				event.GetFailed(), event.GetChanged(), event.GetMessage())
-		}
-		if sent := api.mutating(); len(sent) != 0 {
-			t.Errorf("recreated must not touch a collection that already matches, sent %v", sent)
-		}
-	})
-
-	t.Run("immutable drift", func(t *testing.T) {
-		api := newFakeAPI(t).
-			on("GET", "/collections/docs",
-				liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil)),
-				liveCollection(t, defaultConfig(unnamedVector(8, "Cosine"), nil))).
-			// The pre-flight: the declared body is built under a throwaway name and
-			// removed again before anything real is dropped.
-			on("GET", "/collections/ss_precheck_46b42b42", notFoundResult("Collection `ss_precheck_46b42b42` doesn't exist!")).
-			on("PUT", "/collections/ss_precheck_46b42b42", okTrue(t)).
-			on("DELETE", "/collections/ss_precheck_46b42b42", okTrue(t)).
-			on("GET", "/aliases", noAliases(t)).
-			on("DELETE", "/collections/docs", okTrue(t)).
-			on("PUT", "/collections/docs", okTrue(t))
-
-		stream := runApply(t, moduleWith(api).collection(), "recreated", docsPresent(map[string]any{
-			"vectors":         map[string]any{"size": 8, "distance": "Cosine"},
-			"confirm_destroy": true,
-		}))
-
-		event := stream.final()
-		if event.GetFailed() {
-			t.Fatalf("recreated with confirm_destroy must rebuild: %s", event.GetMessage())
-		}
-		if !event.GetChanged() {
-			t.Error("a rebuild must report changed=true")
-		}
-
-		// Only the calls against the REAL collection: the pre-flight builds and
-		// removes a throwaway one first, and that is the point of it.
-		var order []string
-		for _, c := range api.mutating() {
-			if c.path == "/collections/docs" {
-				order = append(order, c.method)
-			}
-		}
-		if len(order) != 2 || order[0] != "DELETE" || order[1] != "PUT" {
-			t.Errorf("a rebuild is a DELETE then a PUT, got %v", order)
-		}
-		// The operator must be told what it cost, in the message they actually see.
-		if !strings.Contains(strings.ToLower(event.GetMessage()), "destroy") {
-			t.Errorf("a rebuild must say the data was destroyed:\n%s", event.GetMessage())
-		}
-	})
-}
-
-// TestCollectionRecreatedRefusesWithoutConfirmDestroy — in BOTH phases. Validate is a
-// separate RPC a runner need not call, so an interlock that lives only there is an
-// interlock the runtime never reaches (NIM-786).
-func TestCollectionRecreatedRefusesWithoutConfirmDestroy(t *testing.T) {
-	cases := map[string]map[string]any{
-		"omitted": docsPresent(nil),
-		"false":   docsPresent(map[string]any{"confirm_destroy": false}),
-	}
-
-	for name, params := range cases {
-		t.Run(name, func(t *testing.T) {
-			// Validate refuses.
-			reply := runValidate(t, moduleWith(newFakeAPI(t)).collection(), "recreated", params)
-			if reply.GetOk() {
-				t.Error("Validate must refuse recreated without confirm_destroy: true")
-			}
-
-			// And so does Apply, without reaching the instance at all: the fake has
-			// no scripted endpoint, so any request would fail the test outright.
-			api := newFakeAPI(t)
-			stream := runApply(t, moduleWith(api).collection(), "recreated", params)
-			if !stream.final().GetFailed() {
-				t.Error("Apply must refuse recreated without confirm_destroy: true")
-			}
-			if len(api.calls) != 0 {
-				t.Errorf("the refusal must not reach the instance, called %v", api.pathsHit())
-			}
-		})
-	}
-}
-
 // TestCollectionAbsentIsIdempotent — a collection that is not there sends no DELETE.
 func TestCollectionAbsentIsIdempotent(t *testing.T) {
 	api := newFakeAPI(t).
@@ -309,7 +211,8 @@ func TestCollectionAbsentFailsWhenTheDeleteDidNotTake(t *testing.T) {
 	stillThere := liveCollection(t, defaultConfig(unnamedVector(4, "Cosine"), nil))
 	api := newFakeAPI(t).
 		on("GET", "/collections/docs", stillThere).
-		on("DELETE", "/collections/docs", okResult(t, false))
+		on("DELETE", "/collections/docs", okResult(t, false)).
+		on("GET", "/aliases", noAliases(t))
 
 	stream := runApply(t, moduleWith(api).collection(), "absent",
 		baseParams(map[string]any{"name": "docs"}))

@@ -390,7 +390,7 @@ func TestConflictMessageNamesBothValues(t *testing.T) {
 	)
 	text := refusalText("docs", plan.conflicts)
 
-	for _, want := range []string{"docs", `params.vectors."".size`, "params.shard_number", "recreated", "confirm_destroy"} {
+	for _, want := range []string{"docs", `params.vectors."".size`, "params.shard_number", "snapshot", "absent"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the refusal must mention %q:\n%s", want, text)
 		}

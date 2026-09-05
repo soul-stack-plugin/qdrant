@@ -168,8 +168,7 @@ func with(base []string, extra ...string) []string {
 	return append(out, extra...)
 }
 
-// collectionShape is the declared shape of a collection, which `present` and
-// `recreated` share.
+// collectionShape is the declared shape of a collection, as `present` accepts it.
 var collectionShape = []string{
 	"name", "vectors",
 	"shard_number", "sharding_method", "wal_config",
@@ -192,11 +191,6 @@ func TestManifestStatesDeclareWhatTheyAccept(t *testing.T) {
 			"probed":  with(connectParams, "name"),
 			"absent":  with(connectParams, "name"),
 			"present": with(connectParams, collectionShape...),
-			// confirm_destroy is the ONLY difference between the two reconciling
-			// states, and it is the parameter that stands between a scenario and the
-			// loss of a collection. A row that let it drift would be the one place
-			// this table has to be exact.
-			"recreated": with(connectParams, append(append([]string{}, collectionShape...), "confirm_destroy")...),
 		},
 		"alias": {
 			"present": with(connectParams, "name", "collection"),

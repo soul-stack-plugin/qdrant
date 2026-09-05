@@ -14,7 +14,6 @@ package qdrant
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -52,32 +51,13 @@ func validateCollectionAbsent(f map[string]*structpb.Value) []string {
 func validateCollectionPresent(f map[string]*structpb.Value) []string {
 	errs := append(validateCollectionProbed(f), validateVectors(f)...)
 	// The bounds and key sets Qdrant enforces on a create body (limits.go). Refused
-	// here so a typo stops the run before it starts, and checked again before the drop
-	// in `recreated`. Neither is the safety mechanism any more — precheckCreateBody
-	// asks the server itself — but a misspelled key inside a CREATION-ONLY map still
-	// has to be caught by name, because Qdrant accepts and discards it, which makes it
-	// permanent drift and turns `recreated` into a deletion on every run.
+	// here so a typo stops the run before it starts rather than arriving as a 400 from
+	// the create. A misspelled key inside a passthrough map matters especially: Qdrant
+	// accepts it, discards it, and still answers 200, so it would otherwise be drift
+	// this module could never reconcile and would report on every run.
 	declared := declaredCollection(f)
 	errs = append(errs, checkCollectionBounds(declared)...)
 	return append(errs, checkPassthroughKeys(declared)...)
-}
-
-// validateCollectionRecreated — as present, plus the explicit authority to destroy.
-//
-// confirm_destroy is required and must be literally `true`. It is not a default that
-// can be flipped by a var resolving to something falsy: this is the parameter standing
-// between a scenario and the loss of a collection's contents.
-func validateCollectionRecreated(f map[string]*structpb.Value) []string {
-	errs := validateCollectionPresent(f)
-
-	v, present := f["confirm_destroy"]
-	if !present || v == nil {
-		return append(errs, "params.confirm_destroy: is required by qdrant.collection.recreated and must be true — this state may DROP the collection and everything in it")
-	}
-	if bv, ok := v.GetKind().(*structpb.Value_BoolValue); !ok || !bv.BoolValue {
-		return append(errs, "params.confirm_destroy: must be true — this state may DROP the collection and everything in it. Use qdrant.collection.present to reconcile without that authority")
-	}
-	return errs
 }
 
 // validateVectors checks the declared vector layout in both of its spellings.
@@ -152,22 +132,13 @@ func (m *Module) applyCollectionProbed(ctx context.Context, stream eventStream, 
 // rather than recreating when the declaration asks for something only a recreation
 // could deliver.
 func (m *Module) applyCollectionPresent(ctx context.Context, stream eventStream, api qdrantAPI, params *structpb.Struct) error {
-	return m.reconcileCollection(ctx, stream, api, params, false)
+	return m.reconcileCollection(ctx, stream, api, params)
 }
 
-// applyCollectionRecreated is `present` plus the authority to drop and rebuild.
-//
-// It is NOT "always recreate": on a collection that already matches it changes nothing
-// and reports changed=false. That is the entire difference between a state and a
-// scheduled outage — an action that recreated unconditionally would destroy the
-// collection on every run of the scenario that contains it.
-func (m *Module) applyCollectionRecreated(ctx context.Context, stream eventStream, api qdrantAPI, params *structpb.Struct) error {
-	return m.reconcileCollection(ctx, stream, api, params, true)
-}
-
-// reconcileCollection is the body of both states; mayRecreate is the only difference
-// between them.
-func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, api qdrantAPI, params *structpb.Struct, mayRecreate bool) error {
+// reconcileCollection creates the collection when it is missing and reconciles what
+// Qdrant can reconcile on a live one. It has no destructive path at all: v1 offers no
+// state that rebuilds a collection, so nothing here can reach a DELETE.
+func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, api qdrantAPI, params *structpb.Struct) error {
 	f := params.GetFields()
 	apiKey := stringOrEmpty(f["api_key"])
 	name := strings.TrimSpace(stringOrEmpty(f["name"]))
@@ -183,71 +154,17 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 			return sendFailure(stream, err.Error())
 		}
 		return m.verifyCollection(ctx, stream, api, declared, name, apiKey, "created", fmt.Sprintf("collection %q created", name),
-			map[string]any{"created": true, "recreated": false})
+			map[string]any{"created": true})
 	}
 
 	plan := planCollection(declared, info.Config)
 
-	if len(plan.conflicts) > 0 && !mayRecreate {
-		// The refusal lands here, before a single mutating request. Applying the
-		// reachable half first and failing afterwards would leave the collection in
-		// a shape nobody declared — which is worse than either outcome the author
-		// asked for.
-		return sendFailure(stream, refusalText(name, plan.conflicts))
-	}
-
 	if len(plan.conflicts) > 0 {
-		// LAST CHANCE TO REFUSE. Past the DELETE below there is no way back: Qdrant
-		// has no dry-run create, and nothing rolls a drop back. A create body it
-		// would reject — shard_number 0, a vector size over the ceiling, an
-		// ef_construct under the floor — would end this run with the collection
-		// already destroyed and nothing to rebuild it from. Validate checks the same
-		// bounds, but Validate is a separate RPC a runner need not call, and this is
-		// the one path where that gap is paid for in data.
-		if errs := checkCollectionBounds(declared); len(errs) > 0 {
-			return sendFailure(stream, fmt.Sprintf(
-				"collection %q was NOT touched: Qdrant would refuse this declaration, and this state drops the collection BEFORE it creates it — %s",
-				name, strings.Join(errs, "; ")))
-		}
-		// And then ask the server itself, because the bounds above can only cover what
-		// this build was taught. Nothing has been destroyed at this point.
-		if err := m.precheckCreateBody(ctx, api, name, createBody(declared), apiKey); err != nil {
-			return sendFailure(stream, fmt.Sprintf("collection %q was NOT touched: %s", name, err.Error()))
-		}
-		// A name occupied by an ALIAS reads as present through GET (which resolves
-		// aliases) but cannot be dropped or created through it. Refusing here keeps
-		// the module from announcing a destruction it did not perform.
-		if aliases, err := listAliases(ctx, api, apiKey); err != nil {
-			return sendFailure(stream, fmt.Sprintf("collection %q was NOT touched: %s", name, err.Error()))
-		} else if target, isAlias := aliases[name]; isAlias {
-			return sendFailure(stream, fmt.Sprintf(
-				"collection %q was NOT touched: %q is an ALIAS pointing at collection %q, not a collection. Qdrant resolves an alias on a read but refuses to create or delete through one, so this state cannot rebuild it. Address the collection by its own name, or move the alias first with qdrant.alias.",
-				name, name, target))
-		}
-		removed, err := m.dropCollection(ctx, api, name, apiKey)
-		if err != nil {
-			return sendFailure(stream, err.Error())
-		}
-		if !removed {
-			// Qdrant reported that nothing was deleted. Something else removed or
-			// renamed it between the read and this call; either way nothing of ours
-			// is gone, and saying so beats the alternative message.
-			return sendFailure(stream, fmt.Sprintf(
-				"collection %q was NOT dropped — Qdrant reported there was nothing to delete, so it disappeared between the read and the drop. Nothing was destroyed by this step; re-run to see the current state.", name))
-		}
-		if err := m.createCollection(ctx, api, name, createBody(declared), apiKey); err != nil {
-			// The collection is already gone. Say that first and plainly: an operator
-			// who reads only the create error concludes the run stopped before doing
-			// anything, and re-runs a scenario whose later steps assume the data is
-			// still there.
-			return sendFailure(stream, fmt.Sprintf(
-				"collection %q HAS BEEN DROPPED AND ITS DATA IS GONE, and re-creating it then failed: %s. "+
-					"The collection does not exist right now — fix the declaration and re-run to create it empty, or restore from a snapshot.",
-				name, err.Error()))
-		}
-		return m.verifyCollection(ctx, stream, api, declared, name, apiKey, "recreated",
-			fmt.Sprintf("collection %q RECREATED, its data destroyed: %s", name, joinConflicts(plan.conflicts)),
-			map[string]any{"created": false, "recreated": true})
+		// The refusal lands here, before a single mutating request. Applying the
+		// reachable half first and failing afterwards would leave the collection in a
+		// shape nobody declared — which is worse than either outcome the author asked
+		// for.
+		return sendFailure(stream, refusalText(name, plan.conflicts))
 	}
 
 	if plan.empty() {
@@ -255,7 +172,7 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 		// the full set: a gate written against a key must find it on EVERY run, and
 		// the converged run is the one it will meet most often.
 		return sendOutcome(stream, false, fmt.Sprintf("collection %q is already in the declared shape", name), map[string]any{
-			"name": name, "exists": true, "created": false, "recreated": false,
+			"name": name, "exists": true, "created": false,
 		})
 	}
 
@@ -272,7 +189,7 @@ func (m *Module) reconcileCollection(ctx context.Context, stream eventStream, ap
 	}
 	return m.verifyCollection(ctx, stream, api, declared, name, apiKey, "updated",
 		fmt.Sprintf("collection %q reconciled: %s", name, strings.Join(changes, ", ")),
-		map[string]any{"created": false, "recreated": false})
+		map[string]any{"created": false})
 }
 
 // verifyCollection re-reads the collection and refuses to report success while the
@@ -308,68 +225,6 @@ func (m *Module) verifyCollection(ctx context.Context, stream eventStream, api q
 	return sendOutcome(stream, true, message, output)
 }
 
-// precheckName is the throwaway collection the pre-flight builds under.
-//
-// Derived from a hash rather than concatenated, so it is a constant 20 characters
-// whatever the subject is called: Qdrant caps a collection name at 255 (measured), and
-// a plain suffix made this state fail on a legal 243-character name that every other
-// state handles.
-func precheckName(name string) string {
-	return fmt.Sprintf("ss_precheck_%x", sha256.Sum256([]byte(name)))[:20]
-}
-
-// precheckCreateBody proves the declared create body is acceptable to THIS server —
-// by building it under a throwaway name and removing it again — BEFORE anything
-// destructive happens.
-//
-// # Why this exists rather than a longer table of bounds
-//
-// `recreated` drops the collection and then creates it. Qdrant has no dry-run create,
-// so everything the create might be refused for has to be known in advance, and three
-// independent reviews found three more ways to be refused that limits.go did not
-// know: a floor taken from the update schema where the collection schema has a
-// stricter one (`wal_retain_closed: 0` is not even a 400 — it panics the server into a
-// 500), a misspelled enum on a creation-only key, and a wrong-typed leaf inside a
-// passthrough map. Every round of enumeration found another one, which is the signal
-// that enumeration is the wrong instrument: the set of things a given Qdrant build
-// refuses is Qdrant's to know, not this module's to predict.
-//
-// So the module stops predicting and asks. The probe costs one create and one delete
-// of an EMPTY collection, and it converts every present and future validation rule of
-// Qdrant's — including ones added in versions this code has never seen — into a
-// refusal that happens while the real collection is still there.
-//
-// limits.go is still worth keeping in front of it: it turns the common typo into a
-// message that names the parameter, instead of a 400 relayed from the server.
-func (m *Module) precheckCreateBody(ctx context.Context, api qdrantAPI, name string, body map[string]any, apiKey string) error {
-	probe := precheckName(name)
-
-	// Never touch a collection that is already there — the name is unlikely, but
-	// "unlikely" is not a licence to delete someone's data.
-	if _, exists, err := readCollection(ctx, api, probe, apiKey); err != nil {
-		return fmt.Errorf("could not check for the pre-flight collection: %s", err.Error())
-	} else if exists {
-		return fmt.Errorf("a collection named %q already exists, so the pre-flight that proves this declaration is buildable cannot run; remove it and re-run", probe)
-	}
-
-	if err := m.createCollection(ctx, api, probe, body, apiKey); err != nil {
-		// The create may have landed anyway — a client-side timeout on a slow create
-		// is indistinguishable from a rejection from here — and a leftover probe
-		// would block this state on every subsequent run. Best effort, and the
-		// outcome does not change what the operator is told.
-		_, _ = m.dropCollection(ctx, api, probe, apiKey)
-		return fmt.Errorf("the pre-flight build of this declaration failed, so nothing was dropped — %s", err.Error())
-	}
-
-	if _, err := m.dropCollection(ctx, api, probe, apiKey); err != nil {
-		// The declaration is fine, but a leftover would collide with the next run.
-		// Stop rather than proceed: whatever prevents a delete now would prevent the
-		// real one in a moment.
-		return fmt.Errorf("the pre-flight collection %q could not be removed and is still there: %s", probe, err.Error())
-	}
-	return nil
-}
-
 // applyCollectionAbsent removes a collection. Idempotent: one that is not there is a
 // no-op that sends no DELETE at all.
 func (m *Module) applyCollectionAbsent(ctx context.Context, stream eventStream, api qdrantAPI, params *structpb.Struct) error {
@@ -384,11 +239,28 @@ func (m *Module) applyCollectionAbsent(ctx context.Context, stream eventStream, 
 	if !exists {
 		return sendOutcome(stream, false, fmt.Sprintf("collection %q is already absent", name), map[string]any{"name": name})
 	}
-	if _, err := m.dropCollection(ctx, api, name, apiKey); err != nil {
+	removed, err := m.dropCollection(ctx, api, name, apiKey)
+	if err != nil {
 		return sendFailure(stream, err.Error())
 	}
-	// Qdrant answers 200 {"result":false} when there was nothing to delete, so the
-	// response is not evidence of removal here either.
+	if !removed {
+		// Qdrant answers 200 {"result":false} when there was nothing to delete, and
+		// the commonest way to get here is an ALIAS: `GET /collections/<x>` RESOLVES
+		// one and answers with the target's config, so the read above said "present",
+		// while DELETE does not resolve and removes nothing. Saying "still exists"
+		// would send an operator looking for a collection that was never there under
+		// that name.
+		if aliases, aErr := listAliases(ctx, api, apiKey); aErr == nil {
+			if target, isAlias := aliases[name]; isAlias {
+				return sendFailure(stream, fmt.Sprintf(
+					"nothing was deleted: %q is an ALIAS pointing at collection %q, not a collection. Qdrant resolves an alias on a read but not on a delete, so this state cannot remove it — use qdrant.alias.absent for the alias, or name the collection itself.",
+					name, target))
+			}
+		}
+		return sendFailure(stream, fmt.Sprintf(
+			"nothing was deleted: Qdrant reported there was no collection %q to remove, although it read as present a moment earlier", name))
+	}
+	// And the removal is confirmed by reading it back, not by the response.
 	if _, stillThere, err := readCollection(ctx, api, name, apiKey); err != nil {
 		return sendFailure(stream, err.Error())
 	} else if stillThere {
@@ -410,7 +282,7 @@ func refusalText(name string, conflicts []conflict) string {
 	}
 	return fmt.Sprintf(
 		"collection %q cannot be reconciled in place — %s can only be changed by recreating the collection, which destroys every point in it:\n%s\n"+
-			"Either bring the declaration back in line with the live collection, or use state `recreated` with confirm_destroy: true, which DROPS the collection and builds it again.",
+			"Bring the declaration back in line with the live collection. This module offers no state that rebuilds one: reaching the declared shape means dropping the collection and creating it again, which destroys every point in it, and that is a decision to take deliberately — take a snapshot (qdrant.snapshot.created), then qdrant.collection.absent, then qdrant.collection.present.",
 		name, plural(len(conflicts), "setting", "settings"), strings.Join(lines, "\n"))
 }
 

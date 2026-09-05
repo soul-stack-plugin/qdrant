@@ -2,10 +2,11 @@
 //
 // Four actions, and the interesting boundary is between two of them. `present`
 // reconciles what Qdrant can reconcile on a live collection and REFUSES what it
-// cannot; `recreated` is the same reconciliation holding the authority to drop and
-// rebuild, which destroys the collection's contents and therefore has to be asked for
-// in writing. The reason that boundary exists at all — Qdrant accepts an impossible
-// update and silently discards it — is documented in collection.go.
+// cannot. There is deliberately NO state here that rebuilds one: four independent
+// reviews each found a fresh way for a drop-then-create to destroy data it could not
+// then restore, so v1 refuses and says what it would take instead. The reason the
+// boundary exists at all — Qdrant accepts an impossible update and silently discards it
+// — is documented in collection.go.
 package qdrant
 
 import (
@@ -27,10 +28,9 @@ func (m *Module) collection() *object {
 		name: "collection",
 		decl: collectionStates(),
 		actions: map[string]action{
-			"probed":    {validate: validateCollectionProbed, apply: (*Module).applyCollectionProbed},
-			"present":   {validate: validateCollectionPresent, apply: (*Module).applyCollectionPresent},
-			"recreated": {validate: validateCollectionRecreated, apply: (*Module).applyCollectionRecreated},
-			"absent":    {validate: validateCollectionAbsent, apply: (*Module).applyCollectionAbsent},
+			"probed":  {validate: validateCollectionProbed, apply: (*Module).applyCollectionProbed},
+			"present": {validate: validateCollectionPresent, apply: (*Module).applyCollectionPresent},
+			"absent":  {validate: validateCollectionAbsent, apply: (*Module).applyCollectionAbsent},
 		},
 	}
 }
@@ -155,11 +155,6 @@ func collectionStates() map[string]module.State {
 
 	present := withConnect(shape)
 
-	recreated := withConnect(shape)
-	recreated["confirm_destroy"] = module.Param{Type: module.Bool, Required: true,
-		Description: "Must be literally true. It is the written authority for an action that DROPS the collection and everything in it when the declared shape cannot be reached otherwise. Required rather than defaulted, and refused when false, because a var resolving to something falsy must not be the thing standing between a scenario and the loss of a collection.",
-	}
-
 	subject := withConnect(module.Input{
 		"name": collectionParam("Collection name. Addresses a URL path segment, so it carries no whitespace, slash, \"?\" or \"#\"."),
 	})
@@ -194,8 +189,7 @@ func collectionStates() map[string]module.State {
 				"collection — that would destroy every point in it — and it does not quietly\n" +
 				"send the update either, because Qdrant ACCEPTS an update to those fields,\n" +
 				"answers 200 {\"result\":true} and discards it. Reporting that as a change\n" +
-				"would be a lie that repeats on every run. To rebuild deliberately, use\n" +
-				"qdrant.collection.recreated.\n" +
+				"would be a lie that repeats on every run.\n" +
 				"\n" +
 				"Idempotent: a collection already in the declared shape sends no request at\n" +
 				"all and reports changed=false. `changed` is decided by comparing the\n" +
@@ -209,25 +203,6 @@ func collectionStates() map[string]module.State {
 				"and qdrant.index. No dry-run preview.",
 			Input: present,
 		},
-		"recreated": {
-			Description: "As qdrant.collection.present, but authorized to DROP AND REBUILD the\n" +
-				"collection when the declared shape cannot be reached on the live one\n" +
-				"(a changed vector `size` or `distance`, `shard_number`, `sharding_method`,\n" +
-				"`wal_config`, or a named vector that exists and is no longer declared).\n" +
-				"Requires confirm_destroy: true.\n" +
-				"\n" +
-				"★ WHEN IT FIRES, EVERY POINT IN THE COLLECTION IS LOST. Qdrant has no\n" +
-				"in-place path for these settings and no rename, so there is nothing to\n" +
-				"preserve behind. Take a snapshot first (qdrant.snapshot.created) if the\n" +
-				"contents matter.\n" +
-				"\n" +
-				"It is NOT \"recreate every run\": a collection that already matches is left\n" +
-				"untouched with changed=false, and one that differs only in reconcilable\n" +
-				"settings is patched in place exactly as `present` would. Recreating\n" +
-				"unconditionally would destroy the data on every run, which is the opposite\n" +
-				"of what a declared state means. No dry-run preview.",
-			Input: recreated,
-		},
 		"absent": {
 			Description: "Remove ONE collection and everything in it (no qdrant CLI, no shell).\n" +
 				"\n" +
@@ -237,9 +212,9 @@ func collectionStates() map[string]module.State {
 				"happened rather than what was asked. The removal is verified by reading the\n" +
 				"collection back.\n" +
 				"\n" +
-				"This destroys the collection's contents. Unlike recreated it carries no\n" +
-				"confirm_destroy, because `absent` IS the declaration — there is no reading of\n" +
-				"it under which the data survives. No dry-run preview.",
+				"This destroys the collection's contents, and it carries no confirmation flag\n" +
+				"because `absent` IS the declaration — there is no reading of it under which\n" +
+				"the data survives. No dry-run preview.",
 			Input: subject,
 		},
 	}
