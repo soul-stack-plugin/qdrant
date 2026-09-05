@@ -64,7 +64,7 @@ Two rules follow, and they run through every object here:
 
 Derived from the difference between Qdrant's `CreateCollection` and `UpdateCollection`
 request bodies, and encoded once in `collectionFields` / `vectorFields`
-(`collection.go`).
+(`internal/qdrant/collection.go`).
 
 **Reconciled in place:** `replication_factor`, `write_consistency_factor`,
 `on_disk_payload`, `hnsw_config`, `optimizers_config`, `quantization_config`, and per
@@ -162,22 +162,35 @@ is not.
 ## Building
 
 ```sh
-make check                              # fmt, vet, offline tests, build
-make test-live QDRANT_ADDR=127.0.0.1:6333   # against a real Qdrant
-make stamp SOUL_STACK=../soul-stack     # stamp the schema into the binary
-make verify                             # the sha256 an operator approves
+make check                          # gofmt, vet, offline tests, build, stamp, verify
+make live QDRANT_ADDR=127.0.0.1:6333    # against a real Qdrant
+make verify                         # the stamped schema still matches the code
 ```
 
-`make check` needs nothing but this repository. `make stamp` needs a soul-stack
-checkout: `soul-mod` cannot be fetched with `go run ...@version`, because the published
-SDK module still carries a `replace` directive and Go refuses to run a tool out of a
-module that has one. Importing the SDK as a library is unaffected.
+Everything runs from a fresh clone with nothing installed: `soul-mod` is run out of
+the SDK this module already depends on. Note the Makefile invokes it **without** an
+`@version` suffix and do not add one — the versioned form resolves the tool's module
+independently of this one, and the published SDK still carries a `replace` that Go
+refuses to run a tool through.
+
+This repository commits **no** `schema.json`. The document is derived from the Go
+values in `internal/qdrant`, stamped into the binary by `make build` and written beside
+it; `make verify` is what proves the stamp still matches the code, and the release
+workflow publishes the document as an asset. A committed copy would be one more thing
+that can go stale between an edit and a re-stamp.
 
 The offline suite covers the whole domain model — which settings are reconcilable,
 which are refused, and that a refusal sends nothing. The live suite additionally
 asserts the *premise* against a real server: that Qdrant still answers 200 to an
 immutable-field patch and changes nothing. If a future Qdrant starts rejecting those
-properly, that test is what will say so.
+properly, that test is what will say so; CI runs it against three Qdrant versions.
+
+## Layout
+
+```
+cmd/qdrant/          the entry point: one call to module.ServeBundle
+internal/qdrant/     the five objects, one REST driver, and the tests
+```
 
 ## Delivery
 
