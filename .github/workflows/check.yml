@@ -1,0 +1,90 @@
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Both architectures run the whole gate, not just a compile. `soul-mod stamp` and
+  # `soul-mod verify` execute the artifact to read its schema back, so a cross-compiled
+  # binary cannot be stamped on a foreign host — each arch has to do its own. Native
+  # runners make that a non-issue and keep QEMU out of the picture.
+  check:
+    name: check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: gofmt, vet, test, build, stamp, verify
+        run: make check
+
+  # The live tier is what keeps this module honest, and the matrix is over real servers
+  # for a specific reason: the whole `collection` object is built on a measured
+  # behaviour of Qdrant's — that it answers 200 {"result":true} to an update of a field
+  # it cannot change, and discards it. A fake cannot prove that still holds. The suite
+  # carries a canary (TestLiveQdrantStillDiscardsAnImmutablePatch) that asserts the
+  # premise itself, so if a future Qdrant starts refusing those properly, this job is
+  # what says so rather than a user finding out.
+  live:
+    name: live (qdrant ${{ matrix.qdrant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        qdrant: ['v1.12.0', 'v1.15.0', 'latest']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Start Qdrant
+        run: |
+          docker run -d --name qdrant -p 6333:6333 "qdrant/qdrant:${{ matrix.qdrant }}"
+
+      # A container that has not finished starting looks exactly like a broken module
+      # from the test's side. Wait for it to answer, and if it never does, print its
+      # log rather than letting the tier fail with a connection error that says nothing
+      # about why.
+      - name: Wait for it to answer
+        run: |
+          up=""
+          for _ in $(seq 1 60); do
+            if curl -sS -o /dev/null http://127.0.0.1:6333/healthz 2>/dev/null; then
+              up=yes
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$up" ]; then
+            echo "qdrant never answered /healthz"
+            docker logs qdrant || true
+            exit 1
+          fi
+          curl -sS http://127.0.0.1:6333/
+
+      - name: Live tier
+        run: make live QDRANT_ADDR=127.0.0.1:6333
+
+      - name: Server log on failure
+        if: failure()
+        run: docker logs qdrant || true
